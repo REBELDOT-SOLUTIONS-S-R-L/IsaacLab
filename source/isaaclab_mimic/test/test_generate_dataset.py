@@ -14,6 +14,7 @@ import os
 import subprocess
 import tempfile
 
+import h5py
 import pytest
 
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR, retrieve_file_path
@@ -140,3 +141,63 @@ def test_generate_dataset(setup_test_environment):
     # Check for specific output
     expected_output = "successes/attempts. Exiting"
     assert expected_output in result.stdout
+
+
+@pytest.mark.isaacsim_ci
+def test_generate_standard_dataset(setup_test_environment):
+    """Test standard-schema annotation and generation."""
+    workflow_root = setup_test_environment
+    standard_annotated_file = DATASETS_DOWNLOAD_DIR + "/standard_annotated_dataset.hdf5"
+    standard_generated_file = DATASETS_DOWNLOAD_DIR + "/standard_generated_dataset.hdf5"
+
+    annotate_command = [
+        workflow_root + "/isaaclab.sh",
+        "-p",
+        os.path.join(workflow_root, "scripts/imitation_learning/isaaclab_mimic/annotate_demos.py"),
+        "--task",
+        "Isaac-Stack-Cube-Franka-IK-Rel-Mimic-v0",
+        "--input_file",
+        DATASETS_DOWNLOAD_DIR + "/dataset.hdf5",
+        "--output_file",
+        standard_annotated_file,
+        "--auto",
+        "--dataset_schema",
+        "standard",
+        "--headless",
+    ]
+    annotate_result = subprocess.run(annotate_command, capture_output=True, text=True)
+    print("Standard annotate result:")
+    print(annotate_result.stdout)
+    print(annotate_result.stderr)
+    assert annotate_result.returncode == 0, annotate_result.stderr
+
+    generate_command = [
+        workflow_root + "/isaaclab.sh",
+        "-p",
+        os.path.join(workflow_root, "scripts/imitation_learning/isaaclab_mimic/generate_dataset.py"),
+        "--input_file",
+        standard_annotated_file,
+        "--output_file",
+        standard_generated_file,
+        "--generation_num_trials",
+        "1",
+        "--dataset_schema",
+        "standard",
+        "--headless",
+    ]
+    generate_result = subprocess.run(generate_command, capture_output=True, text=True)
+    print("Standard generation result:")
+    print(generate_result.stdout)
+    print(generate_result.stderr)
+    assert generate_result.returncode == 0, generate_result.stderr
+
+    with h5py.File(standard_annotated_file, "r") as annotated_file:
+        annotated_demo = next(iter(annotated_file["data"].values()))
+        assert "datagen_info" in annotated_demo["obs"]
+
+    with h5py.File(standard_generated_file, "r") as generated_file:
+        generated_demo = next(iter(generated_file["data"].values()))
+        assert "datagen_info" not in generated_demo["obs"]
+        assert "reference_demo_indices" in generated_demo
+        for reference_indices in generated_demo["reference_demo_indices"].values():
+            assert len(reference_indices.shape) == 1

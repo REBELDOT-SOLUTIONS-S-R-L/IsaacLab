@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 
 from isaaclab.utils.datasets import EpisodeData, HDF5DatasetFileHandler
 
@@ -111,7 +112,7 @@ class DataGenInfoPool:
             raise ValueError("Episode to be loaded to DatagenInfo pool lacks datagen_info annotations")
 
         # Extract gripper actions
-        gripper_actions = self.env.actions_to_gripper_actions(ep_grp["actions"])
+        gripper_actions = self._extract_gripper_actions(episode)
 
         ep_datagen_info_obj = DatagenInfo(
             eef_pose=eef_pose,
@@ -152,7 +153,7 @@ class DataGenInfoPool:
 
                 if eef_subtask_index == len(self.subtask_term_signal_names[eef_name]) - 1:
                     # Last subtask has no termination signal from the datagen_info
-                    end_index = ep_grp["actions"].shape[0]
+                    end_index = self._get_num_action_samples(ep_grp["actions"])
                 else:
                     # Trick to detect index where first 0 -> 1 transition occurs - this will be the end of the subtask
                     subtask_term_indicators = (
@@ -202,6 +203,75 @@ class DataGenInfoPool:
                     )
 
             self._subtask_boundaries[eef_name].append(eef_subtask_boundaries)
+
+    def _get_num_action_samples(self, actions) -> int:
+        if isinstance(actions, dict):
+            if "pose" in actions:
+                return int(actions["pose"].shape[0])
+            if "joints" in actions:
+                return int(actions["joints"].shape[0])
+            raise ValueError("Standard actions group lacks 'pose' and 'joints' datasets")
+        return int(actions.shape[0])
+
+    def _extract_gripper_actions(self, episode: EpisodeData) -> dict[str, object]:
+        actions = episode.data["actions"]
+        if not isinstance(actions, dict):
+            return self.env.actions_to_gripper_actions(actions)
+
+        if "pose" not in actions:
+            raise ValueError("Standard action group lacks 'pose' dataset for gripper extraction")
+
+        pose_actions = actions["pose"]
+        attrs = episode.attrs.get("actions/pose", {})
+        component_slices = self._decode_json_attr(attrs.get("component_slices"), default={})
+        entity_order = self._decode_json_attr(attrs.get("entity_order"), default=None)
+        if entity_order is None and component_slices:
+            entity_order = list(component_slices.keys())
+        if entity_order is None:
+            entity_order = list(self.env_cfg.subtask_configs)
+        if not component_slices:
+            component_slices = self._infer_pose_component_slices(pose_actions.shape[-1], entity_order)
+
+        gripper_actions = {}
+        for eef_name in entity_order:
+            gripper_slice = component_slices[eef_name]["gripper"]
+            gripper_actions[eef_name] = pose_actions[:, gripper_slice[0] : gripper_slice[1]]
+        return gripper_actions
+
+    def _decode_json_attr(self, value, default):
+        if value is None:
+            return default
+        if isinstance(value, bytes):
+            value = value.decode("utf-8")
+        if isinstance(value, str):
+            return json.loads(value)
+        return value
+
+    def _infer_pose_component_slices(self, action_dim: int, entity_order: list[str]) -> dict:
+        if not entity_order:
+            raise ValueError("Cannot infer standard actions/pose component slices without an entity_order")
+        fixed_pose_dim = 7 * len(entity_order)
+        if action_dim < fixed_pose_dim:
+            raise ValueError(
+                f"Standard actions/pose dimension {action_dim} is too small for {len(entity_order)} EEF pose blocks"
+            )
+        remaining_dim = action_dim - fixed_pose_dim
+        if remaining_dim % len(entity_order) != 0:
+            raise ValueError(
+                "Cannot infer standard actions/pose gripper slices because remaining action dimension "
+                f"{remaining_dim} is not divisible by {len(entity_order)} EEFs. Add component_slices attrs."
+            )
+        gripper_dim = remaining_dim // len(entity_order)
+        component_slices = {}
+        start = 0
+        for eef_name in entity_order:
+            pose_start = start
+            pose_end = pose_start + 7
+            gripper_start = pose_end
+            gripper_end = gripper_start + gripper_dim
+            component_slices[eef_name] = {"pose": [pose_start, pose_end], "gripper": [gripper_start, gripper_end]}
+            start = gripper_end
+        return component_slices
 
     def load_from_dataset_file(self, file_path, select_demo_keys: str | None = None):
         """

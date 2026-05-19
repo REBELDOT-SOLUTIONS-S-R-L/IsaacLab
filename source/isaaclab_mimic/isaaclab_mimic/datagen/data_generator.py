@@ -677,6 +677,7 @@ class DataGenerator:
         next_eef_subtask_trajectories_after_motion = {}
         current_eef_subtask_step_indices = {}
         eef_subtasks_done = {}
+        current_eef_reference_demo_indices = {}
         for eef_name in self.env_cfg.subtask_configs.keys():
             current_eef_selected_src_demo_indices[eef_name] = None
             current_eef_subtask_trajectories[eef_name] = []  # type of list of Waypoint
@@ -685,6 +686,7 @@ class DataGenerator:
             next_eef_subtask_trajectories_after_motion[eef_name] = None
             current_eef_subtask_step_indices[eef_name] = None
             eef_subtasks_done[eef_name] = False
+            current_eef_reference_demo_indices[eef_name] = []
 
         prev_src_demo_datagen_info_pool_size = 0
 
@@ -721,6 +723,9 @@ class DataGenerator:
                                 randomized_subtask_boundaries,
                                 runtime_subtask_constraints_dict,
                                 current_eef_selected_src_demo_indices,  # updated in the method
+                            )
+                            current_eef_reference_demo_indices[eef_name].append(
+                                current_eef_selected_src_demo_indices[eef_name]
                             )
                             # With skillgen, use a motion planner to transition between subtasks.
                             if self.env_cfg.datagen_config.use_skillgen:
@@ -990,6 +995,11 @@ class DataGenerator:
         self.env.recorder_manager.set_success_to_episodes(
             env_id_tensor, torch.tensor([[generated_success]], dtype=torch.bool, device=self.env.device)
         )
+        recorded_episode = self.env.recorder_manager.get_episode(env_id)
+        recorded_episode.data["reference_demo_indices"] = {
+            eef_name: torch.tensor(indices, dtype=torch.int64, device=self.env.device)
+            for eef_name, indices in current_eef_reference_demo_indices.items()
+        }
         if export_demo:
             self.env.recorder_manager.export_episodes(env_id_tensor)
 

@@ -44,6 +44,12 @@ parser.add_argument(
     default=False,
     help="use skillgen to generate motion trajectories",
 )
+parser.add_argument(
+    "--dataset_schema",
+    choices=["legacy", "standard"],
+    default="legacy",
+    help="Dataset schema to use for the generated output file.",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -71,6 +77,7 @@ import numpy as np
 import torch
 
 from isaaclab.envs import ManagerBasedRLMimicEnv
+from isaaclab.envs.mdp.recorders.recorders_cfg import StandardGeneratedMimicRecorderManagerCfg
 
 import isaaclab_mimic.envs  # noqa: F401
 
@@ -97,6 +104,7 @@ def main():
     env_name = task_name or get_env_name_from_dataset(args_cli.input_file)
 
     # Configure environment
+    recorder_cfg = StandardGeneratedMimicRecorderManagerCfg() if args_cli.dataset_schema == "standard" else None
     env_cfg, success_term = setup_env_config(
         env_name=env_name,
         output_dir=output_dir,
@@ -104,6 +112,7 @@ def main():
         num_envs=num_envs,
         device=args_cli.device,
         generation_num_trials=args_cli.generation_num_trials,
+        recorder_cfg=recorder_cfg,
     )
 
     # Create environment

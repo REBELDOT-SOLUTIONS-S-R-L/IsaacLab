@@ -19,6 +19,7 @@ class EpisodeData:
     def __init__(self) -> None:
         """Initializes episode data class."""
         self._data = dict()
+        self._attrs = dict()
         self._next_action_index = 0
         self._next_state_index = 0
         self._next_joint_target_index = 0
@@ -35,6 +36,16 @@ class EpisodeData:
     def data(self, data: dict):
         """Set the episode data."""
         self._data = data
+
+    @property
+    def attrs(self):
+        """Returns the loaded HDF5 attributes keyed by dataset/group path."""
+        return self._attrs
+
+    @attrs.setter
+    def attrs(self, attrs: dict):
+        """Set the loaded HDF5 attributes."""
+        self._attrs = attrs
 
     @property
     def seed(self):

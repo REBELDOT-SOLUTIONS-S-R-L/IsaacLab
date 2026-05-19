@@ -40,6 +40,12 @@ parser.add_argument(
     default=False,
     help="Enable annotating start points of subtasks.",
 )
+parser.add_argument(
+    "--dataset_schema",
+    choices=["legacy", "standard"],
+    default="legacy",
+    help="Dataset schema to use for the annotated output file.",
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -74,7 +80,10 @@ if not args_cli.headless and not os.environ.get("HEADLESS", 0):
     from isaaclab.devices import Se3Keyboard, Se3KeyboardCfg
 
 from isaaclab.envs import ManagerBasedRLMimicEnv
-from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
+from isaaclab.envs.mdp.recorders.recorders_cfg import (
+    ActionStateRecorderManagerCfg,
+    StandardAnnotatedMimicRecorderManagerCfg,
+)
 from isaaclab.managers import RecorderTerm, RecorderTermCfg, TerminationTermCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.datasets import EpisodeData, HDF5DatasetFileHandler
@@ -213,7 +222,10 @@ def main():
     env_cfg.terminations = None
 
     # Set up recorder terms for mimic annotations
-    env_cfg.recorders = MimicRecorderManagerCfg()
+    if args_cli.dataset_schema == "standard":
+        env_cfg.recorders = StandardAnnotatedMimicRecorderManagerCfg()
+    else:
+        env_cfg.recorders = MimicRecorderManagerCfg()
     if not args_cli.auto:
         # disable subtask term signals recorder term if in manual mode
         env_cfg.recorders.record_pre_step_subtask_term_signals = None

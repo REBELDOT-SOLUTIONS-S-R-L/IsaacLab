@@ -184,6 +184,8 @@ class RecorderManager(ManagerBase):
         self._dataset_file_handler = None
         if cfg.dataset_export_mode != DatasetExportMode.EXPORT_NONE:
             self._dataset_file_handler = cfg.dataset_file_handler_class_type()
+            if hasattr(self._dataset_file_handler, "set_recorder_metadata"):
+                self._dataset_file_handler.set_recorder_metadata(cfg, env, failed=False)
             self._dataset_file_handler.create(
                 os.path.join(cfg.dataset_export_dir_path, cfg.dataset_filename), env_name=env_name
             )
@@ -191,6 +193,8 @@ class RecorderManager(ManagerBase):
         self._failed_episode_dataset_file_handler = None
         if cfg.dataset_export_mode == DatasetExportMode.EXPORT_SUCCEEDED_FAILED_IN_SEPARATE_FILES:
             self._failed_episode_dataset_file_handler = cfg.dataset_file_handler_class_type()
+            if hasattr(self._failed_episode_dataset_file_handler, "set_recorder_metadata"):
+                self._failed_episode_dataset_file_handler.set_recorder_metadata(cfg, env, failed=True)
             self._failed_episode_dataset_file_handler.create(
                 os.path.join(cfg.dataset_export_dir_path, f"{cfg.dataset_filename}_failed"), env_name=env_name
             )
@@ -562,6 +566,15 @@ class RecorderManager(ManagerBase):
                 "dataset_export_mode",
                 "export_in_record_pre_reset",
                 "export_in_close",
+                "schema_version",
+                "fps",
+                "actions_frame",
+                "description",
+                "entity_order",
+                "articulation_order",
+                "camera_names",
+                "extra_sensor_fields",
+                "action_pose_component_slices",
             ]:
                 continue
             # check if term config is None
