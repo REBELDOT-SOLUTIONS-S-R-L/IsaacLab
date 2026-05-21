@@ -30,6 +30,24 @@ parser.add_argument(
     ),
 )
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
+parser.add_argument(
+    "--dataset_dir",
+    type=str,
+    default=None,
+    help=(
+        "Directory where the recorded HDF5 dataset will be written. Only applied when the"
+        " environment cfg has a recorder configured. Defaults to the recorder's own default."
+    ),
+)
+parser.add_argument(
+    "--dataset_file",
+    type=str,
+    default=None,
+    help=(
+        "Filename (without extension) for the recorded dataset. Only applied when the"
+        " environment cfg has a recorder configured."
+    ),
+)
 parser.add_argument("--sensitivity", type=float, default=1.0, help="Sensitivity factor.")
 parser.add_argument(
     "--enable_pinocchio",
@@ -101,7 +119,12 @@ def main() -> None:
             f"Received environment config type: {type(env_cfg).__name__}"
         )
     # modify configuration
-    env_cfg.terminations.time_out = None
+    # Recorder-enabled environments (IL workflows) want to keep `time_out` so
+    # episodes auto-reset at the configured `episode_length_s`. For non-recorder
+    # tasks, fall back to the upstream behavior of disabling time_out so the
+    # operator can teleop indefinitely.
+    if getattr(env_cfg, "recorders", None) is None:
+        env_cfg.terminations.time_out = None
     if "Lift" in args_cli.task:
         # set the resampling time range to large number to avoid resampling
         env_cfg.commands.object_pose.resampling_time_range = (1.0e9, 1.0e9)
@@ -111,6 +134,19 @@ def main() -> None:
     if args_cli.xr:
         env_cfg = remove_camera_configs(env_cfg)
         env_cfg.sim.render.antialiasing_mode = "DLSS"
+        # Re-attach any task-defined cameras that the XR pipeline just stripped.
+        # Tasks opt in by setting `env_cfg.xr_camera_reattach` to a callable
+        # that accepts the scene cfg.
+        xr_camera_reattach = getattr(env_cfg, "xr_camera_reattach", None)
+        if xr_camera_reattach is not None:
+            xr_camera_reattach(env_cfg.scene)
+
+    # Apply per-run dataset path overrides for recorder-enabled environments.
+    if getattr(env_cfg, "recorders", None) is not None:
+        if args_cli.dataset_dir is not None:
+            env_cfg.recorders.dataset_export_dir_path = args_cli.dataset_dir
+        if args_cli.dataset_file is not None:
+            env_cfg.recorders.dataset_filename = args_cli.dataset_file
 
     try:
         # create environment

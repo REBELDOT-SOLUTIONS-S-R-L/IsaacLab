@@ -481,6 +481,9 @@ def main() -> int:
         install_latched_signal_adapter(env, annotator)
         log_status(logging.INFO, "Annotation queues configured: %s", format_progress(annotator))
 
+        recorded_demo_count = 0
+        recording_active = False
+        completion_announced = False
         flags = {"start": False, "save": False, "discard": False, "abort": False, "reset": False}
 
         def on_start() -> None:
@@ -500,6 +503,10 @@ def main() -> int:
             log_status(logging.WARNING, "[ESC] Abort requested.")
 
         def on_reset() -> None:
+            if recording_active and annotator.is_complete():
+                flags["save"] = True
+                log_status(logging.INFO, "[RESET] Save requested because annotation queues are complete.")
+                return
             flags["reset"] = True
             log_status(logging.INFO, "[RESET] Reset requested.")
 
@@ -520,15 +527,11 @@ def main() -> int:
         log_status(logging.INFO, "Resetting annotated recording episode.")
         reset_episode(env, teleop_interface, annotator)
 
-        recorded_demo_count = 0
-        recording_active = False
-        completion_announced = False
-
         log_status(logging.INFO, "Using teleop device: %s", teleop_interface)
         if args_cli.xr:
             log_status(
                 logging.INFO,
-                "XR controls: START begins recording, STOP saves after queues complete, RESET discards/reset.",
+                "XR controls: START begins recording, RESET saves after queues complete or discards before completion.",
             )
         else:
             log_status(
@@ -605,13 +608,21 @@ def main() -> int:
                     log_status(logging.INFO, "Latched: %s", ", ".join(newly_latched))
                     log_status(logging.INFO, "Annotation progress: %s", format_progress(annotator))
 
+                # Publish the current queue heads so subtask observation
+                # functions can gate any per-step debug printing to the
+                # signal each EEF is actively dwelling on.
+                env._debug_subtask_heads = {
+                    signal for signal in annotator.current_signal_heads().values()
+                    if signal is not None
+                }
+
                 _, _, terminated, truncated, _ = env.step(action)
 
                 if annotator.is_complete() and not completion_announced:
                     if args_cli.xr:
                         log_status(
                             logging.INFO,
-                            "All annotation queues completed. Send STOP to save the episode or RESET to re-record.",
+                            "All annotation queues completed. Send RESET to save the episode.",
                         )
                     else:
                         log_status(
@@ -628,6 +639,16 @@ def main() -> int:
 
                 if rate_limiter is not None:
                     rate_limiter.sleep(env)
+
+        if recording_active and annotator.is_complete():
+            log_status(logging.INFO, "Saving completed episode before exit.")
+            export_successful_episode(env)
+            recorded_demo_count = env.recorder_manager.exported_successful_episode_count
+            log_status(
+                logging.INFO,
+                "Saved annotated episode. Recorded %d successful demonstrations.",
+                recorded_demo_count,
+            )
 
         return recorded_demo_count
     finally:
