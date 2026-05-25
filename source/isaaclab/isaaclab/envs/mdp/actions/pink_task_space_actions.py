@@ -91,7 +91,7 @@ class PinkInverseKinematicsAction(ActionTerm):
             self._ik_controllers.append(
                 PinkIKController(
                     cfg=self.cfg.controller.copy(),
-                    robot_cfg=self._env.scene.cfg.robot,
+                    robot_cfg=getattr(self._env.scene.cfg, self.cfg.controller.articulation_name),
                     device=self.device,
                     controlled_joint_indices=self._isaaclab_controlled_joint_ids,
                 )
