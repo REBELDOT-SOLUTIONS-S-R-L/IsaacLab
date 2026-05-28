@@ -140,7 +140,9 @@ class FrankaCubeStackIKRelMimicEnv(ManagerBasedRLMimicEnv):
         # last dimension is gripper action
         return {list(self.cfg.subtask_configs.keys())[0]: actions[:, -1:]}
 
-    def get_subtask_term_signals(self, env_ids: Sequence[int] | None = None) -> dict[str, torch.Tensor]:
+    def get_subtask_term_signals(
+        self, env_ids: Sequence[int] | None = None, signal_names: Sequence[str] | None = None
+    ) -> dict[str, torch.Tensor]:
         """
         Gets a dictionary of termination signal flags for each subtask in a task. The flag is 1
         when the subtask has been completed and 0 otherwise. The implementation of this method is
@@ -150,6 +152,7 @@ class FrankaCubeStackIKRelMimicEnv(ManagerBasedRLMimicEnv):
 
         Args:
             env_ids: Environment indices to get the termination signals for. If None, all envs are considered.
+            signal_names: Optional names of signals to compute. If None, all signals are returned.
 
         Returns:
             A dictionary termination signal flags (False or True) for each subtask.
@@ -159,9 +162,10 @@ class FrankaCubeStackIKRelMimicEnv(ManagerBasedRLMimicEnv):
 
         signals = dict()
         subtask_terms = self.obs_buf["subtask_terms"]
-        signals["grasp_1"] = subtask_terms["grasp_1"][env_ids]
-        signals["grasp_2"] = subtask_terms["grasp_2"][env_ids]
-        signals["stack_1"] = subtask_terms["stack_1"][env_ids]
+        requested_signal_names = set(signal_names) if signal_names is not None else None
+        for signal_name in ("grasp_1", "grasp_2", "stack_1"):
+            if requested_signal_names is None or signal_name in requested_signal_names:
+                signals[signal_name] = subtask_terms[signal_name][env_ids]
         # final subtask is placing cubeC on cubeA (motion relative to cubeA) - but final subtask signal is not needed
         return signals
 

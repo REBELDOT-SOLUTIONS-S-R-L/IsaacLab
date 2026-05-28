@@ -64,7 +64,9 @@ class PickPlaceRelMimicEnv(FrankaCubeStackIKRelMimicEnv):
 
         return object_pose_matrix
 
-    def get_subtask_term_signals(self, env_ids: Sequence[int] | None = None) -> dict[str, torch.Tensor]:
+    def get_subtask_term_signals(
+        self, env_ids: Sequence[int] | None = None, signal_names: Sequence[str] | None = None
+    ) -> dict[str, torch.Tensor]:
         """
         Gets a dictionary of termination signal flags for each subtask in a task. The flag is 1
         when the subtask has been completed and 0 otherwise. The implementation of this method is
@@ -74,6 +76,7 @@ class PickPlaceRelMimicEnv(FrankaCubeStackIKRelMimicEnv):
 
         Args:
             env_ids: Environment indices to get the termination signals for. If None, all envs are considered.
+            signal_names: Optional names of signals to compute. If None, all signals are returned.
 
         Returns:
             A dictionary termination signal flags (False or True) for each subtask.
@@ -84,13 +87,14 @@ class PickPlaceRelMimicEnv(FrankaCubeStackIKRelMimicEnv):
         signals = dict()
 
         subtask_terms = self.obs_buf["subtask_terms"]
-        if "grasp" in subtask_terms:
+        requested_signal_names = set(signal_names) if signal_names is not None else None
+        if "grasp" in subtask_terms and (requested_signal_names is None or "grasp" in requested_signal_names):
             signals["grasp"] = subtask_terms["grasp"][env_ids]
 
         # Handle multiple grasp signals
         for i in range(0, len(self.cfg.subtask_configs)):
             grasp_key = f"grasp_{i + 1}"
-            if grasp_key in subtask_terms:
+            if grasp_key in subtask_terms and (requested_signal_names is None or grasp_key in requested_signal_names):
                 signals[grasp_key] = subtask_terms[grasp_key][env_ids]
         # final subtask signal is not needed
         return signals
@@ -147,7 +151,9 @@ class PickPlaceAbsMimicEnv(FrankaCubeStackIKAbsMimicEnv):
 
         return object_pose_matrix
 
-    def get_subtask_term_signals(self, env_ids: Sequence[int] | None = None) -> dict[str, torch.Tensor]:
+    def get_subtask_term_signals(
+        self, env_ids: Sequence[int] | None = None, signal_names: Sequence[str] | None = None
+    ) -> dict[str, torch.Tensor]:
         """
         Gets a dictionary of termination signal flags for each subtask in a task. The flag is 1
         when the subtask has been completed and 0 otherwise. The implementation of this method is
@@ -157,6 +163,7 @@ class PickPlaceAbsMimicEnv(FrankaCubeStackIKAbsMimicEnv):
 
         Args:
             env_ids: Environment indices to get the termination signals for. If None, all envs are considered.
+            signal_names: Optional names of signals to compute. If None, all signals are returned.
 
         Returns:
             A dictionary termination signal flags (False or True) for each subtask.
@@ -167,13 +174,14 @@ class PickPlaceAbsMimicEnv(FrankaCubeStackIKAbsMimicEnv):
         signals = dict()
 
         subtask_terms = self.obs_buf["subtask_terms"]
-        if "grasp" in subtask_terms:
+        requested_signal_names = set(signal_names) if signal_names is not None else None
+        if "grasp" in subtask_terms and (requested_signal_names is None or "grasp" in requested_signal_names):
             signals["grasp"] = subtask_terms["grasp"][env_ids]
 
         # Handle multiple grasp signals
         for i in range(0, len(self.cfg.subtask_configs)):
             grasp_key = f"grasp_{i + 1}"
-            if grasp_key in subtask_terms:
+            if grasp_key in subtask_terms and (requested_signal_names is None or grasp_key in requested_signal_names):
                 signals[grasp_key] = subtask_terms[grasp_key][env_ids]
         # final subtask signal is not needed
         return signals

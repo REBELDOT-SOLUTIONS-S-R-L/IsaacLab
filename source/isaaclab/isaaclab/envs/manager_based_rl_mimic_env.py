@@ -140,7 +140,9 @@ class ManagerBasedRLMimicEnv(ManagerBasedRLEnv):
         """
         raise NotImplementedError
 
-    def get_subtask_term_signals(self, env_ids: Sequence[int] | None = None) -> dict[str, torch.Tensor]:
+    def get_subtask_term_signals(
+        self, env_ids: Sequence[int] | None = None, signal_names: Sequence[str] | None = None
+    ) -> dict[str, torch.Tensor]:
         """
         Gets a dictionary of termination signal flags for each subtask in a task. The flag is 1
         when the subtask has been completed and 0 otherwise. The implementation of this method is
@@ -150,6 +152,7 @@ class ManagerBasedRLMimicEnv(ManagerBasedRLEnv):
 
         Args:
             env_ids: Environment indices to get the termination signals for. If None, all envs are considered.
+            signal_names: Optional names of signals to compute. If None, all signals are returned.
 
         Returns:
             A dictionary termination signal flags (False or True) for each subtask.

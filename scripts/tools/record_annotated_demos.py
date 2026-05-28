@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import inspect
 import logging
 import os
 import time
@@ -152,8 +153,11 @@ class OnlineSubtaskAnnotationState:
     default_signal_dwell: int = 3
     signal_dwells: dict[str, int] = field(default_factory=dict)
     latched_signals: dict[str, bool] = field(init=False)
+    latched_signal_tensors: dict[str, torch.Tensor] = field(init=False)
     eef_queue_indices: dict[str, int] = field(init=False)
     consecutive_true_counts: dict[str, int] = field(init=False)
+    consecutive_true_count_tensors: dict[str, torch.Tensor] = field(init=False)
+    required_dwell_tensors: dict[str, torch.Tensor] = field(init=False)
 
     def __post_init__(self) -> None:
         signal_names = [signal for queue in self.eef_queues.values() for signal in queue]
@@ -166,8 +170,18 @@ class OnlineSubtaskAnnotationState:
         if not signal_names:
             raise ValueError("No subtask term signals found in env.cfg.subtask_configs.")
         self.latched_signals = {signal: False for signal in signal_names}
+        self.latched_signal_tensors = {
+            signal: torch.zeros((1, 1), dtype=torch.bool, device=self.device) for signal in signal_names
+        }
         self.eef_queue_indices = {eef_name: 0 for eef_name in self.eef_queues}
         self.consecutive_true_counts = {eef_name: 0 for eef_name in self.eef_queues}
+        self.consecutive_true_count_tensors = {
+            eef_name: torch.zeros((), dtype=torch.long, device=self.device) for eef_name in self.eef_queues
+        }
+        self.required_dwell_tensors = {
+            signal: torch.tensor(self._required_dwell(signal), dtype=torch.long, device=self.device)
+            for signal in signal_names
+        }
 
     @classmethod
     def from_env(
@@ -201,9 +215,11 @@ class OnlineSubtaskAnnotationState:
     def reset(self) -> None:
         for signal_name in self.latched_signals:
             self.latched_signals[signal_name] = False
+            self.latched_signal_tensors[signal_name].fill_(False)
         for eef_name in self.eef_queue_indices:
             self.eef_queue_indices[eef_name] = 0
             self.consecutive_true_counts[eef_name] = 0
+            self.consecutive_true_count_tensors[eef_name].zero_()
 
     def current_signal_heads(self) -> dict[str, str | None]:
         return {eef_name: self._head_signal_for_eef(eef_name) for eef_name in self.eef_queues}
@@ -224,39 +240,58 @@ class OnlineSubtaskAnnotationState:
         else:
             num_envs = len(env_ids)
         values = {}
-        for signal_name, latched in self.latched_signals.items():
-            values[signal_name] = torch.full((num_envs, 1), bool(latched), dtype=torch.bool, device=self.device)
+        for signal_name, tensor in self.latched_signal_tensors.items():
+            values[signal_name] = tensor if num_envs == 1 else tensor.expand(num_envs, 1)
         return values
 
-    def advance(self, raw_signal_reader: Callable[[], dict[str, Any]]) -> list[str]:
-        raw_signals = raw_signal_reader()
+    def advance(self, raw_signal_reader: Callable[[Sequence[str]], dict[str, Any]]) -> list[str]:
+        active_heads = [
+            (eef_name, signal_name)
+            for eef_name, signal_name in self.current_signal_heads().items()
+            if signal_name is not None
+        ]
+        if not active_heads:
+            for eef_name in self.consecutive_true_count_tensors:
+                self.consecutive_true_counts[eef_name] = 0
+                self.consecutive_true_count_tensors[eef_name].zero_()
+            return []
+
+        active_signal_names = [signal_name for _, signal_name in active_heads]
+        raw_signals = raw_signal_reader(active_signal_names)
         newly_latched: list[str] = []
 
-        for eef_name in self.eef_queues:
-            signal_name = self._head_signal_for_eef(eef_name)
-            if signal_name is None:
-                self.consecutive_true_counts[eef_name] = 0
-                continue
-
+        raw_true_values = []
+        for eef_name, signal_name in active_heads:
             if signal_name not in raw_signals:
                 available = sorted(raw_signals.keys())
                 raise KeyError(
                     f"Raw subtask predicates did not include queue head '{signal_name}' for EEF '{eef_name}'. "
                     f"Available signals: {available}"
                 )
+            raw_true_values.append(
+                torch.as_tensor(raw_signals[signal_name], device=self.device).reshape(-1)[0].to(dtype=torch.bool)
+            )
 
-            is_true = bool(torch.as_tensor(raw_signals[signal_name], device=self.device).reshape(-1)[0].item())
-            if is_true:
-                self.consecutive_true_counts[eef_name] += 1
-            else:
-                self.consecutive_true_counts[eef_name] = 0
+        raw_true_tensor = torch.stack(raw_true_values)
+        current_counts = torch.stack([self.consecutive_true_count_tensors[eef_name] for eef_name, _ in active_heads])
+        updated_counts = torch.where(raw_true_tensor, current_counts + 1, torch.zeros_like(current_counts))
+        required_dwells = torch.stack([self.required_dwell_tensors[signal_name] for _, signal_name in active_heads])
+        ready_mask = updated_counts >= required_dwells
 
-            if self.consecutive_true_counts[eef_name] < self._required_dwell(signal_name):
+        for index, (eef_name, _) in enumerate(active_heads):
+            self.consecutive_true_count_tensors[eef_name].copy_(updated_counts[index])
+
+        count_and_ready = torch.stack((updated_counts, ready_mask.to(updated_counts.dtype)), dim=-1).cpu().tolist()
+        for (eef_name, signal_name), (count_value, ready_value) in zip(active_heads, count_and_ready):
+            self.consecutive_true_counts[eef_name] = int(count_value)
+            if not bool(ready_value):
                 continue
 
             self.latched_signals[signal_name] = True
+            self.latched_signal_tensors[signal_name].fill_(True)
             self.eef_queue_indices[eef_name] += 1
             self.consecutive_true_counts[eef_name] = 0
+            self.consecutive_true_count_tensors[eef_name].zero_()
             newly_latched.append(signal_name)
 
         return newly_latched
@@ -401,21 +436,40 @@ def install_standard_mimic_method_adapters(env: ManagerBasedRLEnv) -> None:
     env.get_object_poses = types.MethodType(get_object_poses, env)
 
 
-def make_raw_signal_reader(env: ManagerBasedRLEnv) -> Callable[[], dict[str, Any]]:
+def method_accepts_signal_names(method: Callable) -> bool:
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError):
+        return False
+    return "signal_names" in signature.parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()
+    )
+
+
+def make_raw_signal_reader(env: ManagerBasedRLEnv) -> Callable[[Sequence[str]], dict[str, Any]]:
     if hasattr(env, "get_subtask_term_predicates"):
         raw_signal_method = env.get_subtask_term_predicates
     else:
         raw_signal_method = env.get_subtask_term_signals
 
-    def read_raw_signals() -> dict[str, Any]:
+    accepts_signal_names = method_accepts_signal_names(raw_signal_method)
+
+    def read_raw_signals(signal_names: Sequence[str]) -> dict[str, Any]:
+        if accepts_signal_names:
+            return raw_signal_method(env_ids=[0], signal_names=list(signal_names))
         return raw_signal_method(env_ids=[0])
 
     return read_raw_signals
 
 
 def install_latched_signal_adapter(env: ManagerBasedRLEnv, annotator: OnlineSubtaskAnnotationState) -> None:
-    def get_latched_subtask_term_signals(_env, env_ids: Sequence[int] | None = None):
-        return annotator.as_tensor_dict(env_ids=env_ids)
+    def get_latched_subtask_term_signals(
+        _env, env_ids: Sequence[int] | None = None, signal_names: Sequence[str] | None = None
+    ):
+        signals = annotator.as_tensor_dict(env_ids=env_ids)
+        if signal_names is not None:
+            return {signal_name: signals[signal_name] for signal_name in signal_names if signal_name in signals}
+        return signals
 
     env.get_subtask_term_signals = types.MethodType(get_latched_subtask_term_signals, env)
 

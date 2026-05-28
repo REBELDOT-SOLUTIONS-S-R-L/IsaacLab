@@ -104,10 +104,40 @@ def _has_implemented_mimic_method(env, method_name: str) -> bool:
     return method_func is None or not method_func.__qualname__.startswith("ManagerBasedRLMimicEnv.")
 
 
+def _action_cache_signature(action: torch.Tensor) -> tuple:
+    return (id(action), getattr(action, "_version", None), tuple(action.shape), action.device, action.dtype)
+
+
+def _get_standard_mimic_action_cache(env) -> dict:
+    action = env.action_manager.action
+    signature = _action_cache_signature(action)
+    cache = getattr(env, "_standard_mimic_action_cache", None)
+    if not isinstance(cache, dict) or cache.get("signature") != signature:
+        cache = {"signature": signature}
+        setattr(env, "_standard_mimic_action_cache", cache)
+    return cache
+
+
+def _get_cached_target_eef_poses(env) -> dict[str, torch.Tensor]:
+    cache = _get_standard_mimic_action_cache(env)
+    if "target_eef_poses" not in cache:
+        cache["target_eef_poses"] = env.action_to_target_eef_pose(env.action_manager.action)
+    return cache["target_eef_poses"]
+
+
+def _get_cached_gripper_actions(env) -> dict[str, torch.Tensor]:
+    if not _has_implemented_mimic_method(env, "actions_to_gripper_actions"):
+        return {}
+    cache = _get_standard_mimic_action_cache(env)
+    if "gripper_actions" not in cache:
+        cache["gripper_actions"] = env.actions_to_gripper_actions(env.action_manager.action)
+    return cache["gripper_actions"]
+
+
 def _discover_eef_names_from_target_pose_action(env) -> list[str]:
     if not _has_implemented_mimic_method(env, "action_to_target_eef_pose"):
         return []
-    target_eef_poses = env.action_to_target_eef_pose(env.action_manager.action)
+    target_eef_poses = _get_cached_target_eef_poses(env)
     if isinstance(target_eef_poses, dict):
         return list(target_eef_poses.keys())
     return []
@@ -181,12 +211,8 @@ class PreStepStandardPoseActionRecorder(RecorderTerm):
             ["action_to_target_eef_pose"],
             "Standard pose action recording",
         )
-        action = self._env.action_manager.action
-        target_eef_poses = self._env.action_to_target_eef_pose(action)
-        if _has_implemented_mimic_method(self._env, "actions_to_gripper_actions"):
-            gripper_actions = self._env.actions_to_gripper_actions(action)
-        else:
-            gripper_actions = {}
+        target_eef_poses = _get_cached_target_eef_poses(self._env)
+        gripper_actions = _get_cached_gripper_actions(self._env)
         action_blocks = []
         for eef_name in eef_names:
             pose_flat = _pose_matrix_to_flat(target_eef_poses[eef_name])
@@ -271,7 +297,7 @@ class PreStepStandardDatagenInfoRecorder(RecorderTerm):
             ["get_robot_eef_pose", "get_object_poses", "action_to_target_eef_pose"],
             "Standard Mimic datagen annotation recording",
         )
-        target_eef_pose_dict = self._env.action_to_target_eef_pose(self._env.action_manager.action)
+        target_eef_pose_dict = _get_cached_target_eef_poses(self._env)
         eef_names = _get_eef_names(self._env, self.cfg)
         if not eef_names and isinstance(target_eef_pose_dict, dict):
             eef_names = list(target_eef_pose_dict.keys())
