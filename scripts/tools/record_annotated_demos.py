@@ -22,7 +22,7 @@ import os
 import time
 import types
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any
 
 from isaaclab.app import AppLauncher
@@ -97,7 +97,8 @@ from isaaclab.devices.openxr import remove_camera_configs
 from isaaclab.devices.teleop_device_factory import create_teleop_device
 from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg, ManagerBasedRLMimicEnv
 from isaaclab.envs.mdp.recorders.recorders_cfg import StandardAnnotatedMimicRecorderManagerCfg
-from isaaclab.managers import DatasetExportMode
+from isaaclab.managers import DatasetExportMode, SceneEntityCfg
+from isaaclab.sensors import CameraCfg
 
 import isaaclab_mimic.envs  # noqa: F401
 import isaaclab_tasks  # noqa: F401
@@ -362,6 +363,100 @@ def setup_output_directories() -> tuple[str, str]:
     return output_dir, output_file_name
 
 
+def iter_config_items(config: object):
+    """Iterate over config object or dict entries without pulling class methods from dir().
+
+    Some task configs attach scene entities dynamically in ``__post_init__``. Keep those
+    instance attributes visible in addition to dataclass fields.
+    """
+    if config is None:
+        return []
+    if isinstance(config, dict):
+        return list(config.items())
+    if is_dataclass(config):
+        seen = set()
+        items = []
+        for config_field in fields(config):
+            try:
+                items.append((config_field.name, getattr(config, config_field.name)))
+                seen.add(config_field.name)
+            except AttributeError:
+                continue
+        items.extend(
+            (name, value)
+            for name, value in getattr(config, "__dict__", {}).items()
+            if name not in seen and not name.startswith("_")
+        )
+        return items
+    return list(getattr(config, "__dict__", {}).items())
+
+
+def value_references_scene_entity(value: Any, entity_names: set[str]) -> bool:
+    """Return whether a nested config value references one of the named scene entities."""
+    if isinstance(value, SceneEntityCfg):
+        return value.name in entity_names
+    if isinstance(value, dict):
+        return any(value_references_scene_entity(item, entity_names) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(value_references_scene_entity(item, entity_names) for item in value)
+    return False
+
+
+def observation_term_references_scene_entity(term_cfg: object, entity_names: set[str]) -> bool:
+    """Return whether an observation term reads one of the named scene entities."""
+    if value_references_scene_entity(getattr(term_cfg, "params", {}), entity_names):
+        return True
+
+    func = getattr(term_cfg, "func", None)
+    if func is None:
+        return False
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    return any(value_references_scene_entity(param.default, entity_names) for param in signature.parameters.values())
+
+
+def enforce_recorder_camera_sync(env_cfg: ManagerBasedRLEnvCfg) -> tuple[list[str], list[str]]:
+    """Make recorder callbacks the only camera-data sampling path for annotated recording."""
+    env_cfg.scene.lazy_sensor_update = True
+
+    camera_names: list[str] = []
+    for scene_name, scene_attr in iter_config_items(env_cfg.scene):
+        if isinstance(scene_attr, CameraCfg):
+            camera_names.append(scene_name)
+            scene_attr.update_period = 0.0
+
+    camera_name_set = set(camera_names)
+    removed_terms: list[str] = []
+    if not camera_name_set:
+        return camera_names, removed_terms
+
+    observations_cfg = getattr(env_cfg, "observations", None)
+    for group_name, group_cfg in iter_config_items(observations_cfg):
+        if group_cfg is None:
+            continue
+        for term_name, term_cfg in iter_config_items(group_cfg):
+            if term_name in {
+                "enable_corruption",
+                "concatenate_terms",
+                "history_length",
+                "flatten_history_dim",
+                "concatenate_dim",
+            } or term_cfg is None:
+                continue
+            if not observation_term_references_scene_entity(term_cfg, camera_name_set):
+                continue
+
+            if isinstance(group_cfg, dict):
+                group_cfg[term_name] = None
+            else:
+                setattr(group_cfg, term_name, None)
+            removed_terms.append(f"{group_name}.{term_name}")
+
+    return camera_names, removed_terms
+
+
 def create_environment_config(output_dir: str, output_file_name: str) -> ManagerBasedRLEnvCfg:
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=1)
     if not isinstance(env_cfg, ManagerBasedRLEnvCfg):
@@ -382,12 +477,24 @@ def create_environment_config(output_dir: str, output_file_name: str) -> Manager
             env_cfg = remove_camera_configs(env_cfg)
         env_cfg.sim.render.antialiasing_mode = "DLSS"
 
+    camera_names, removed_camera_obs_terms = enforce_recorder_camera_sync(env_cfg)
+
     env_cfg.recorders = StandardAnnotatedMimicRecorderManagerCfg()
     env_cfg.recorders.record_pre_step_subtask_start_signals = None
+    env_cfg.recorders.camera_names = camera_names
+    env_cfg.recorders.record_post_step_observations.camera_names = camera_names
     env_cfg.recorders.dataset_export_dir_path = output_dir
     env_cfg.recorders.dataset_filename = output_file_name
     env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_SUCCEEDED_ONLY
     env_cfg.recorders.fps = float(args_cli.record_hz)
+
+    if camera_names:
+        log_status(
+            logging.INFO,
+            "Strict camera sync enabled for recorder cameras %s. Removed camera observation terms: %s",
+            ", ".join(camera_names),
+            ", ".join(removed_camera_obs_terms) if removed_camera_obs_terms else "none",
+        )
 
     return env_cfg
 
