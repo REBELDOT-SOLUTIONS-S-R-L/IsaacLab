@@ -185,10 +185,8 @@ class OnlineSubtaskAnnotationState:
     device: torch.device | str
     default_signal_dwell: int = 3
     signal_dwells: dict[str, int] = field(default_factory=dict)
-    latched_signals: dict[str, bool] = field(init=False)
     latched_signal_tensors: dict[str, torch.Tensor] = field(init=False)
     eef_queue_indices: dict[str, int] = field(init=False)
-    consecutive_true_counts: dict[str, int] = field(init=False)
     consecutive_true_count_tensors: dict[str, torch.Tensor] = field(init=False)
     required_dwell_tensors: dict[str, torch.Tensor] = field(init=False)
 
@@ -202,12 +200,10 @@ class OnlineSubtaskAnnotationState:
             )
         if not signal_names:
             raise ValueError("No subtask term signals found in env.cfg.subtask_configs.")
-        self.latched_signals = {signal: False for signal in signal_names}
         self.latched_signal_tensors = {
             signal: torch.zeros((1, 1), dtype=torch.bool, device=self.device) for signal in signal_names
         }
         self.eef_queue_indices = {eef_name: 0 for eef_name in self.eef_queues}
-        self.consecutive_true_counts = {eef_name: 0 for eef_name in self.eef_queues}
         self.consecutive_true_count_tensors = {
             eef_name: torch.zeros((), dtype=torch.long, device=self.device) for eef_name in self.eef_queues
         }
@@ -246,12 +242,10 @@ class OnlineSubtaskAnnotationState:
         )
 
     def reset(self) -> None:
-        for signal_name in self.latched_signals:
-            self.latched_signals[signal_name] = False
-            self.latched_signal_tensors[signal_name].fill_(False)
+        for tensor in self.latched_signal_tensors.values():
+            tensor.fill_(False)
         for eef_name in self.eef_queue_indices:
             self.eef_queue_indices[eef_name] = 0
-            self.consecutive_true_counts[eef_name] = 0
             self.consecutive_true_count_tensors[eef_name].zero_()
 
     def current_signal_heads(self) -> dict[str, str | None]:
@@ -285,7 +279,6 @@ class OnlineSubtaskAnnotationState:
         ]
         if not active_heads:
             for eef_name in self.consecutive_true_count_tensors:
-                self.consecutive_true_counts[eef_name] = 0
                 self.consecutive_true_count_tensors[eef_name].zero_()
             return []
 
@@ -314,16 +307,13 @@ class OnlineSubtaskAnnotationState:
         for index, (eef_name, _) in enumerate(active_heads):
             self.consecutive_true_count_tensors[eef_name].copy_(updated_counts[index])
 
-        count_and_ready = torch.stack((updated_counts, ready_mask.to(updated_counts.dtype)), dim=-1).cpu().tolist()
-        for (eef_name, signal_name), (count_value, ready_value) in zip(active_heads, count_and_ready):
-            self.consecutive_true_counts[eef_name] = int(count_value)
-            if not bool(ready_value):
+        ready_values = ready_mask.cpu().tolist()
+        for (eef_name, signal_name), ready_value in zip(active_heads, ready_values):
+            if not ready_value:
                 continue
 
-            self.latched_signals[signal_name] = True
             self.latched_signal_tensors[signal_name].fill_(True)
             self.eef_queue_indices[eef_name] += 1
-            self.consecutive_true_counts[eef_name] = 0
             self.consecutive_true_count_tensors[eef_name].zero_()
             newly_latched.append(signal_name)
 
@@ -615,10 +605,11 @@ def install_latched_signal_adapter(env: ManagerBasedRLEnv, annotator: OnlineSubt
 
 
 def format_progress(annotator: OnlineSubtaskAnnotationState) -> str:
+    heads = annotator.current_signal_heads()
     parts = []
     for eef_name, queue in annotator.eef_queues.items():
         index = int(annotator.eef_queue_indices.get(eef_name, 0))
-        head = annotator.current_signal_heads().get(eef_name)
+        head = heads.get(eef_name)
         next_label = head if head is not None else "complete"
         parts.append(f"{eef_name}: {index}/{len(queue)} next={next_label}")
     return " | ".join(parts)
@@ -637,6 +628,8 @@ def normalize_action(env: ManagerBasedRLEnv, action: Any) -> torch.Tensor | None
     action_tensor = torch.as_tensor(action, device=env.device, dtype=torch.float32)
     if action_tensor.ndim == 1:
         action_tensor = action_tensor.unsqueeze(0)
+    if env.num_envs == 1:
+        return action_tensor
     return action_tensor.repeat(env.num_envs, 1)
 
 
@@ -750,6 +743,16 @@ def main() -> int:
             )
         log_status(logging.INFO, "Annotation queues: %s", format_progress(annotator))
 
+        # ``time_out``/``success`` are disabled in create_environment_config, so the
+        # termination manager usually has no active terms. When that is the case the
+        # done flags can never fire and the per-step ``(terminated | truncated).item()``
+        # would be a pure GPU->CPU sync for a constant False. Skip it unless a task
+        # actually keeps a termination term active.
+        termination_manager = getattr(env, "termination_manager", None)
+        has_active_terminations = bool(termination_manager and termination_manager.active_terms)
+        if not has_active_terminations:
+            log_status(logging.INFO, "No active termination terms; skipping per-step done checks.")
+
         with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
             while simulation_app.is_running():
                 if flags["abort"]:
@@ -823,15 +826,6 @@ def main() -> int:
                         log_status(logging.INFO, "Latched: %s", ", ".join(newly_latched))
                         log_status(logging.INFO, "Annotation progress: %s", format_progress(annotator))
 
-                # Publish the current queue heads so subtask observation
-                # functions can gate any per-step debug printing to the
-                # signal each EEF is actively dwelling on.
-                env._debug_subtask_heads = (
-                    {signal for signal in annotator.current_signal_heads().values() if signal is not None}
-                    if record_this_step
-                    else set()
-                )
-
                 env.recorder_manager.set_step_recording_enabled(record_this_step)
                 try:
                     _, _, terminated, truncated, _ = env.step(action)
@@ -852,7 +846,7 @@ def main() -> int:
                         )
                     completion_announced = True
 
-                if bool(torch.any(terminated).item() or torch.any(truncated).item()):
+                if has_active_terminations and bool((terminated | truncated).any().item()):
                     log_status(logging.WARNING, "Episode terminated/truncated before save. Discarding current attempt.")
                     reset_episode(env, teleop_interface, annotator)
                     recording_active = False
