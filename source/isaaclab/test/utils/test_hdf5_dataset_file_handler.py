@@ -74,6 +74,35 @@ def test_create_dataset_file(temp_dir):
     assert os.path.exists(dataset_file_path + ".hdf5")
 
 
+def test_standard_fps_metadata_override(temp_dir):
+    """Test explicit standard recorder FPS overrides the inferred environment step rate."""
+
+    class DummyRecorderCfg:
+        schema_version = "1.0"
+        actions_frame = "env"
+        description = "test standard dataset"
+        fps = 30.0
+
+    class DummySimCfg:
+        dt = 1.0 / 120.0
+
+    class DummyEnvCfg:
+        sim = DummySimCfg()
+        decimation = 1
+
+    class DummyEnv:
+        cfg = DummyEnvCfg()
+
+    dataset_file_path = os.path.join(temp_dir, f"{uuid.uuid4()}.hdf5")
+    dataset_file_handler = StandardHDF5DatasetFileHandler()
+    dataset_file_handler.set_recorder_metadata(DummyRecorderCfg(), DummyEnv())
+    dataset_file_handler.create(dataset_file_path, "test_env_name")
+    dataset_file_handler.close()
+
+    with h5py.File(dataset_file_path, "r") as h5_file:
+        assert h5_file["data"].attrs["fps"] == 30.0
+
+
 @pytest.mark.parametrize("device", ["cuda:0", "cpu"])
 def test_write_and_load_episode(temp_dir, device):
     """Test writing and loading an episode to and from the dataset file."""

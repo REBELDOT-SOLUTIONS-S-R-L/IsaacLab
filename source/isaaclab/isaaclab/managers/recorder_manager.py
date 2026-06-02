@@ -160,6 +160,7 @@ class RecorderManager(ManagerBase):
         """
         self._term_names: list[str] = list()
         self._terms: dict[str, RecorderTerm] = dict()
+        self._step_recording_enabled = True
 
         # Do nothing if cfg is None or an empty dict
         if not cfg:
@@ -233,6 +234,11 @@ class RecorderManager(ManagerBase):
         return self._term_names
 
     @property
+    def step_recording_enabled(self) -> bool:
+        """Whether per-step recorder callbacks should add data to active episodes."""
+        return self._step_recording_enabled
+
+    @property
     def exported_successful_episode_count(self, env_id=None) -> int:
         """Number of successful episodes.
 
@@ -267,6 +273,10 @@ class RecorderManager(ManagerBase):
     """
     Operations.
     """
+
+    def set_step_recording_enabled(self, enabled: bool) -> None:
+        """Enable or disable per-step recorder callbacks."""
+        self._step_recording_enabled = bool(enabled)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, torch.Tensor]:
         """Resets the recorder data.
@@ -365,7 +375,7 @@ class RecorderManager(ManagerBase):
     def record_pre_step(self) -> None:
         """Trigger recorder terms for pre-step functions."""
         # Do nothing if no active recorder terms are provided
-        if len(self.active_terms) == 0:
+        if len(self.active_terms) == 0 or not self._step_recording_enabled:
             return
 
         for term in self._terms.values():
@@ -375,7 +385,7 @@ class RecorderManager(ManagerBase):
     def record_post_step(self) -> None:
         """Trigger recorder terms for post-step functions."""
         # Do nothing if no active recorder terms are provided
-        if len(self.active_terms) == 0:
+        if len(self.active_terms) == 0 or not self._step_recording_enabled:
             return
 
         for term in self._terms.values():
@@ -385,7 +395,7 @@ class RecorderManager(ManagerBase):
     def record_post_physics_decimation_step(self) -> None:
         """Trigger recorder terms for post-physics step functions in the decimation loop."""
         # Do nothing if no active recorder terms are provided
-        if len(self.active_terms) == 0:
+        if len(self.active_terms) == 0 or not self._step_recording_enabled:
             return
 
         for term in self._terms.values():

@@ -263,12 +263,15 @@ class StandardHDF5DatasetFileHandler(HDF5DatasetFileHandler):
         self._actions_frame = getattr(cfg, "actions_frame", self._actions_frame)
         self._description = getattr(cfg, "description", self._description)
 
+        cfg_fps = float(getattr(cfg, "fps", 0.0))
         sim_dt = getattr(getattr(env.cfg, "sim", None), "dt", None)
         decimation = getattr(env.cfg, "decimation", None)
-        if sim_dt is not None and decimation is not None and sim_dt > 0 and decimation > 0:
+        if cfg_fps > 0:
+            self._fps = cfg_fps
+        elif sim_dt is not None and decimation is not None and sim_dt > 0 and decimation > 0:
             self._fps = 1.0 / (sim_dt * decimation)
         else:
-            self._fps = float(getattr(cfg, "fps", 0.0))
+            self._fps = cfg_fps
 
         cfg_entity_order = getattr(cfg, "entity_order", None)
         if cfg_entity_order:

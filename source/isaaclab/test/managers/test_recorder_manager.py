@@ -237,11 +237,24 @@ def test_record(device, dataset_dir):
     recorder_manager.record_pre_step()
     recorder_manager.record_post_step()
 
+    recorder_manager.set_step_recording_enabled(False)
+    recorder_manager.record_pre_step()
+    recorder_manager.record_post_step()
+
     # check the recorded data
     for env_id in range(env.num_envs):
         episode = recorder_manager.get_episode(env_id)
         assert torch.stack(episode.data["record_pre_step"]).shape == (2, 4)
         assert torch.stack(episode.data["record_post_step"]).shape == (2, 5)
+
+    recorder_manager.set_step_recording_enabled(True)
+    recorder_manager.record_pre_step()
+    recorder_manager.record_post_step()
+
+    for env_id in range(env.num_envs):
+        episode = recorder_manager.get_episode(env_id)
+        assert torch.stack(episode.data["record_pre_step"]).shape == (3, 4)
+        assert torch.stack(episode.data["record_post_step"]).shape == (3, 5)
 
     # Trigger pre-reset callbacks which then export and clean the episode data
     recorder_manager.record_pre_reset(env_ids=None)

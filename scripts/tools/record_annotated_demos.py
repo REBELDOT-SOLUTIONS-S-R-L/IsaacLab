@@ -17,6 +17,7 @@ import argparse
 import contextlib
 import inspect
 import logging
+import math
 import os
 import time
 import types
@@ -44,6 +45,7 @@ parser.add_argument(
     help="File path to export recorded annotated demos.",
 )
 parser.add_argument("--step_hz", type=int, default=30, help="Environment stepping rate in Hz.")
+parser.add_argument("--record_hz", type=int, default=30, help="Dataset recorder sampling rate in Hz.")
 parser.add_argument(
     "--num_demos",
     type=int,
@@ -142,6 +144,36 @@ class RateLimiter:
         if self.last_time < time.time():
             while self.last_time < time.time():
                 self.last_time += self.sleep_duration
+
+
+def resolve_record_step_interval(
+    env: ManagerBasedRLEnv,
+    *,
+    step_hz: int,
+    record_hz: int,
+) -> tuple[int, float, str]:
+    """Resolve how many environment steps should elapse between recorded samples."""
+    if record_hz <= 0:
+        raise ValueError(f"--record_hz must be > 0, got {record_hz}.")
+
+    if step_hz > 0:
+        source_hz = float(step_hz)
+        source_label = "--step_hz"
+    else:
+        step_dt = getattr(env, "step_dt", None)
+        if step_dt is None or step_dt <= 0:
+            raise ValueError("Cannot infer recorder sampling interval because env.step_dt is unavailable.")
+        source_hz = 1.0 / float(step_dt)
+        source_label = "env.step_dt"
+
+    ratio = source_hz / float(record_hz)
+    interval = int(round(ratio))
+    if interval < 1 or not math.isclose(ratio, interval, rel_tol=1e-5, abs_tol=1e-5):
+        raise ValueError(
+            f"--record_hz={record_hz} must evenly divide the environment step rate from {source_label} "
+            f"({source_hz:.6g} Hz)."
+        )
+    return interval, source_hz, source_label
 
 
 @dataclass
@@ -355,6 +387,7 @@ def create_environment_config(output_dir: str, output_file_name: str) -> Manager
     env_cfg.recorders.dataset_export_dir_path = output_dir
     env_cfg.recorders.dataset_filename = output_file_name
     env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_SUCCEEDED_ONLY
+    env_cfg.recorders.fps = float(args_cli.record_hz)
 
     return env_cfg
 
@@ -509,6 +542,8 @@ def export_successful_episode(env: ManagerBasedRLEnv) -> None:
 def main() -> int:
     if args_cli.default_signal_dwell < 1:
         raise ValueError(f"--default_signal_dwell must be >= 1, got {args_cli.default_signal_dwell}.")
+    if args_cli.record_hz <= 0:
+        raise ValueError(f"--record_hz must be > 0, got {args_cli.record_hz}.")
 
     output_dir, output_file_name = setup_output_directories()
     env_cfg = create_environment_config(output_dir, output_file_name)
@@ -537,6 +572,7 @@ def main() -> int:
         recorded_demo_count = 0
         recording_active = False
         completion_announced = False
+        record_step_count = 0
         flags = {"start": False, "save": False, "discard": False, "abort": False, "reset": False}
 
         def on_start() -> None:
@@ -576,6 +612,20 @@ def main() -> int:
         log_status(logging.INFO, "Creating teleop device: %s", args_cli.teleop_device)
         teleop_interface = setup_teleop_device(env_cfg, callbacks)
 
+        record_step_interval, source_hz, source_label = resolve_record_step_interval(
+            env,
+            step_hz=args_cli.step_hz,
+            record_hz=args_cli.record_hz,
+        )
+        log_status(
+            logging.INFO,
+            "Recorder sampling at %d Hz from %s %.6g Hz: recording every %d environment step(s).",
+            args_cli.record_hz,
+            source_label,
+            source_hz,
+            record_step_interval,
+        )
+
         rate_limiter = RateLimiter(args_cli.step_hz) if args_cli.step_hz > 0 else None
         log_status(logging.INFO, "Resetting annotated recording episode.")
         reset_episode(env, teleop_interface, annotator)
@@ -602,6 +652,7 @@ def main() -> int:
                     reset_episode(env, teleop_interface, annotator)
                     recording_active = False
                     completion_announced = False
+                    record_step_count = 0
                     flags["reset"] = False
                     flags["discard"] = False
                     flags["save"] = False
@@ -611,6 +662,7 @@ def main() -> int:
                 if flags["start"] and not recording_active:
                     recording_active = True
                     completion_announced = False
+                    record_step_count = 0
                     flags["start"] = False
                     log_status(logging.INFO, "Recording active. %s", format_progress(annotator))
 
@@ -628,6 +680,7 @@ def main() -> int:
                         reset_episode(env, teleop_interface, annotator)
                         recording_active = False
                         completion_announced = False
+                        record_step_count = 0
                         log_status(logging.INFO, "Ready for next episode. Start when ready.")
                     else:
                         log_status(
@@ -656,20 +709,28 @@ def main() -> int:
                         rate_limiter.sleep(env)
                     continue
 
-                newly_latched = annotator.advance(raw_signal_reader)
-                if newly_latched:
-                    log_status(logging.INFO, "Latched: %s", ", ".join(newly_latched))
-                    log_status(logging.INFO, "Annotation progress: %s", format_progress(annotator))
+                record_this_step = record_step_count % record_step_interval == 0
+                if record_this_step:
+                    newly_latched = annotator.advance(raw_signal_reader)
+                    if newly_latched:
+                        log_status(logging.INFO, "Latched: %s", ", ".join(newly_latched))
+                        log_status(logging.INFO, "Annotation progress: %s", format_progress(annotator))
 
                 # Publish the current queue heads so subtask observation
                 # functions can gate any per-step debug printing to the
                 # signal each EEF is actively dwelling on.
-                env._debug_subtask_heads = {
-                    signal for signal in annotator.current_signal_heads().values()
-                    if signal is not None
-                }
+                env._debug_subtask_heads = (
+                    {signal for signal in annotator.current_signal_heads().values() if signal is not None}
+                    if record_this_step
+                    else set()
+                )
 
-                _, _, terminated, truncated, _ = env.step(action)
+                env.recorder_manager.set_step_recording_enabled(record_this_step)
+                try:
+                    _, _, terminated, truncated, _ = env.step(action)
+                finally:
+                    env.recorder_manager.set_step_recording_enabled(True)
+                record_step_count += 1
 
                 if annotator.is_complete() and not completion_announced:
                     if args_cli.xr:
@@ -689,6 +750,7 @@ def main() -> int:
                     reset_episode(env, teleop_interface, annotator)
                     recording_active = False
                     completion_announced = False
+                    record_step_count = 0
 
                 if rate_limiter is not None:
                     rate_limiter.sleep(env)
