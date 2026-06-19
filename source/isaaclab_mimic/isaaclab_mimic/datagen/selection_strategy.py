@@ -112,6 +112,7 @@ class RandomStrategy(SelectionStrategy):
         eef_pose,
         object_pose,
         src_subtask_datagen_infos,
+        **kwargs,
     ):
         """
         Selects source demonstration index using the current robot pose, relevant object pose
@@ -150,6 +151,7 @@ class NearestNeighborObjectStrategy(SelectionStrategy):
         pos_weight=1.0,
         rot_weight=1.0,
         nn_k=3,
+        **kwargs,
     ):
         """
         Selects source demonstration index using the current robot pose, relevant object pose
@@ -210,6 +212,154 @@ class NearestNeighborObjectStrategy(SelectionStrategy):
         return top_k_neighbors_in_order[rand_k]
 
 
+class NearestNeighborMultiObjectStrategy(SelectionStrategy):
+    """
+    Pick the source demonstration whose poses for *several* objects jointly best match the
+    current scene. This generalizes ``nearest_neighbor_object`` to scenes where the chosen
+    source segment should agree across multiple objects at once (e.g. 3 objects on a table).
+
+    A single source demo must be selected, so per-object distances cannot be minimized
+    independently (each object would vote for a different demo). Instead the per-object
+    pose distances are aggregated into one score per candidate demo, and the demo that
+    minimizes that score is selected. Two aggregations are supported:
+
+    - ``"sum"`` (default): minimize total displacement across objects. A demo can win by
+      matching most objects very well even if one is far off. Matches the convention used
+      by the other nearest-neighbor strategies.
+    - ``"max"`` (minimax): minimize the *worst* per-object distance, so no single object is
+      badly mismatched. Often the better fit for "all objects must be close".
+    - ``"mean"``: same ordering as ``"sum"`` but normalized by object count (useful when the
+      set of compared objects varies between calls).
+
+    Each per-object distance combines position (L2) and rotation (geodesic angle) using the
+    same math as ``nearest_neighbor_object``.
+    """
+
+    # name for registering this class into registry
+    NAME = "nearest_neighbor_multi_object"
+
+    def select_source_demo(
+        self,
+        eef_pose,
+        object_pose,
+        src_subtask_datagen_infos,
+        all_object_poses=None,
+        src_all_object_poses=None,
+        object_names=None,
+        object_weights=None,
+        pos_weight=1.0,
+        rot_weight=1.0,
+        aggregation="sum",
+        nn_k=3,
+        **kwargs,
+    ):
+        """
+        Selects source demonstration index by jointly matching multiple object poses between
+        the current scene and the start of each source subtask segment.
+
+        Args:
+            eef_pose (torch.Tensor): current 4x4 eef pose (unused, kept for interface parity)
+            object_pose (torch.Tensor): current 4x4 pose of this subtask's reference object
+                (unused here; kept for interface parity - use @all_object_poses instead)
+            src_subtask_datagen_infos (list): DatagenInfo instances for the relevant subtask
+                segment in the source demonstrations (used only for the demo count N)
+            all_object_poses (dict): maps object name -> current 4x4 pose in the scene, for
+                every object available this iteration. Injected by the data generator.
+            src_all_object_poses (list): length-N list (one entry per source demo) of dicts
+                mapping object name -> 4x4 pose at the start of that demo's subtask segment.
+                Injected by the data generator.
+            object_names (list | None): subset of object names to compare. Defaults to every
+                object present in both @all_object_poses and all source dicts.
+            object_weights (dict | None): optional per-object multiplier on its distance.
+                Missing objects default to weight 1.0.
+            pos_weight (float): weight on position distance
+            rot_weight (float): weight on rotation distance
+            aggregation (str): how to combine per-object distances - "sum", "max", or "mean"
+            nn_k (int): pick source demo index uniformly at random from the top @nn_k neighbors
+
+        Returns:
+            source_demo_ind (int): index of source demonstration - indicates which source
+                subtask segment to use
+        """
+        if all_object_poses is None or src_all_object_poses is None:
+            raise ValueError(
+                "nearest_neighbor_multi_object requires 'all_object_poses' and"
+                " 'src_all_object_poses' to be provided by the data generator."
+            )
+        if aggregation not in ("sum", "max", "mean"):
+            raise ValueError(f"nearest_neighbor_multi_object: unknown aggregation '{aggregation}'.")
+
+        n_src = len(src_subtask_datagen_infos)
+
+        # by default compare every object that exists both in the current scene and in all
+        # source demos, so a missing object never silently skews the score
+        if object_names is None:
+            object_names = [
+                name
+                for name in all_object_poses
+                if all(name in src_poses for src_poses in src_all_object_poses)
+            ]
+        if len(object_names) == 0:
+            raise ValueError(
+                "nearest_neighbor_multi_object: no common object found between the current"
+                " scene and the source demonstrations."
+            )
+
+        object_weights = object_weights or {}
+
+        # current object pose used as the broadcast target; align source poses to its device
+        ref_device = all_object_poses[object_names[0]].device
+
+        combined_dists = None  # shape [N]
+        for name in object_names:
+            obj_weight = object_weights.get(name, 1.0)
+
+            # source poses for this object across all demos: [N, 4, 4]
+            src_object_poses = torch.stack(
+                [src_all_object_poses[i][name] for i in range(n_src)]
+            ).to(ref_device)
+            cur_object_pose = all_object_poses[name].to(ref_device)
+
+            # split into positions and rotations
+            all_src_obj_pos, all_src_obj_rot = PoseUtils.unmake_pose(src_object_poses)
+            obj_pos, obj_rot = PoseUtils.unmake_pose(cur_object_pose)
+
+            # prepare for broadcasting
+            obj_pos = obj_pos.view(-1, 3)
+            obj_rot_T = obj_rot.transpose(0, 1).view(-1, 3, 3)
+
+            # pos dist is just L2 between positions
+            pos_dists = torch.sqrt(((all_src_obj_pos - obj_pos) ** 2).sum(dim=-1))
+
+            # rotation distance: angle of the delta rotation matrix
+            # (see http://www.boris-belousov.net/2016/12/01/quat-dist/)
+            delta_R = torch.matmul(all_src_obj_rot, obj_rot_T)
+            arc_cos_in = (torch.diagonal(delta_R, dim1=-2, dim2=-1).sum(dim=-1) - 1.0) / 2.0
+            arc_cos_in = torch.clamp(arc_cos_in, -1.0, 1.0)  # clip for numerical stability
+            rot_dists = torch.acos(arc_cos_in)
+
+            # per-object weighted pose distance, shape [N]
+            obj_dists = obj_weight * (pos_weight * pos_dists + rot_weight * rot_dists)
+
+            if combined_dists is None:
+                combined_dists = obj_dists
+            elif aggregation == "max":
+                combined_dists = torch.maximum(combined_dists, obj_dists)
+            else:  # "sum" and "mean" both accumulate
+                combined_dists = combined_dists + obj_dists
+
+        if aggregation == "mean":
+            combined_dists = combined_dists / len(object_names)
+
+        # clip top-k parameter to max possible value
+        nn_k = min(nn_k, n_src)
+
+        # return one of the top-K nearest neighbors uniformly at random
+        rand_k = torch.randint(0, nn_k, (1,)).item()
+        top_k_neighbors_in_order = torch.argsort(combined_dists)[:nn_k]
+        return top_k_neighbors_in_order[rand_k]
+
+
 class NearestNeighborRobotDistanceStrategy(SelectionStrategy):
     """
     Pick source demonstration to be the one that minimizes the distance the robot
@@ -228,6 +378,7 @@ class NearestNeighborRobotDistanceStrategy(SelectionStrategy):
         pos_weight=1.0,
         rot_weight=1.0,
         nn_k=3,
+        **kwargs,
     ):
         """
         Selects source demonstration index using the current robot pose, relevant object pose

@@ -257,6 +257,7 @@ class DataGenerator:
         subtask_object_name: str,
         selection_strategy_name: str,
         selection_strategy_kwargs: dict | None = None,
+        all_object_poses: dict | None = None,
     ) -> int:
         """Helper method to run source subtask segment selection.
 
@@ -269,6 +270,9 @@ class DataGenerator:
             subtask_object_name: name of reference object for this subtask
             selection_strategy_name: name of selection strategy
             selection_strategy_kwargs: extra kwargs for running selection strategy
+            all_object_poses: optional dict mapping every object name to its current 4x4 pose
+                in the scene. Used by multi-object selection strategies that match several
+                objects jointly (e.g. ``nearest_neighbor_multi_object``).
 
         Returns:
             The selected source demo index
@@ -280,6 +284,9 @@ class DataGenerator:
         # We need to collect the datagen info objects over the timesteps for the subtask segment in each source
         # demo, so that it can be used by the selection strategy.
         src_subtask_datagen_infos = []
+        # For multi-object selection strategies we also collect, per source demo, the pose of
+        # every object at the start of the subtask segment.
+        src_all_object_poses = []
         for i in range(len(self.src_demo_datagen_info_pool.datagen_infos)):
             # Datagen info over all timesteps of the src trajectory
             src_ep_datagen_info = self.src_demo_datagen_info_pool.datagen_infos[i]
@@ -287,6 +294,14 @@ class DataGenerator:
             # Time indices for subtask
             subtask_start_ind = src_demo_current_subtask_boundaries[i][0]
             subtask_end_ind = src_demo_current_subtask_boundaries[i][1]
+
+            # Pose of every object at the start of this demo's subtask segment
+            src_all_object_poses.append(
+                {
+                    obj_name: obj_poses[subtask_start_ind]
+                    for obj_name, obj_poses in (src_ep_datagen_info.object_poses or {}).items()
+                }
+            )
 
             # Get subtask segment using indices
             src_subtask_datagen_infos.append(
@@ -319,6 +334,8 @@ class DataGenerator:
             eef_pose=eef_pose,
             object_pose=object_pose,
             src_subtask_datagen_infos=src_subtask_datagen_infos,
+            all_object_poses=all_object_poses,
+            src_all_object_poses=src_all_object_poses,
             **selection_strategy_kwargs,
         )
 
@@ -369,11 +386,10 @@ class DataGenerator:
         subtask_configs = self.env_cfg.subtask_configs[eef_name]
         # name of object for this subtask
         subtask_object_name = self.env_cfg.subtask_configs[eef_name][subtask_ind].object_ref
-        subtask_object_pose = (
-            self.env.get_object_poses(env_ids=[env_id])[subtask_object_name][0]
-            if (subtask_object_name is not None)
-            else None
-        )
+        # current poses of every object in the scene; multi-object selection strategies match
+        # several of these jointly, while single-object strategies only use the subtask object
+        all_object_poses = {name: pose[0] for name, pose in self.env.get_object_poses(env_ids=[env_id]).items()}
+        subtask_object_pose = all_object_poses[subtask_object_name] if (subtask_object_name is not None) else None
 
         is_first_subtask = subtask_ind == 0
 
@@ -427,6 +443,7 @@ class DataGenerator:
                 subtask_object_name=subtask_object_name,
                 selection_strategy_name=self.env_cfg.subtask_configs[eef_name][subtask_ind].selection_strategy,
                 selection_strategy_kwargs=self.env_cfg.subtask_configs[eef_name][subtask_ind].selection_strategy_kwargs,
+                all_object_poses=all_object_poses,
             )
 
         assert selected_src_demo_inds[eef_name] is not None
