@@ -230,7 +230,8 @@ class PostStepStandardJointTargetsRecorder(RecorderTerm):
         joint_targets = []
         for articulation_name in _get_articulation_names(self._env, self.cfg):
             articulation = self._env.scene.articulations[articulation_name]
-            joint_targets.append(articulation.data.joint_pos_target.clone())
+            # EpisodeData takes the owning snapshot when this value is added.
+            joint_targets.append(articulation.data.joint_pos_target)
         if not joint_targets:
             return None, None
         return "actions/joints", torch.cat(joint_targets, dim=-1)
@@ -242,13 +243,24 @@ class PostStepStandardObservationsRecorder(RecorderTerm):
     def record_post_step(self):
         obs = {"articulations": {}, "eef_pose": {}, "object_pose": {}, "cameras": {}}
 
-        scene_state = self._env.scene.get_state(is_relative=True)
-        for articulation_name, articulation_state in scene_state["articulation"].items():
+        # Do not call InteractiveScene.get_state() here: it clones every rigid
+        # object and deformable body even though this standard observation
+        # block only stores articulations. EpisodeData performs the one owning
+        # clone for every tensor immediately after this method returns.
+        for articulation_name in _get_articulation_names(self._env, self.cfg):
+            articulation = self._env.scene.articulations[articulation_name]
+            root_pose = torch.cat(
+                (
+                    articulation.data.root_pos_w - self._env.scene.env_origins,
+                    articulation.data.root_quat_w,
+                ),
+                dim=-1,
+            )
             obs["articulations"][articulation_name] = {
-                "joint_position": articulation_state["joint_position"],
-                "joint_velocity": articulation_state["joint_velocity"],
-                "root_pose": articulation_state["root_pose"],
-                "root_velocity": articulation_state["root_velocity"],
+                "joint_position": articulation.data.joint_pos,
+                "joint_velocity": articulation.data.joint_vel,
+                "root_pose": root_pose,
+                "root_velocity": articulation.data.root_vel_w,
             }
 
         eef_names = _get_eef_names(self._env, self.cfg)
@@ -273,7 +285,9 @@ class PostStepStandardObservationsRecorder(RecorderTerm):
             if sensor is not None and "rgb" in (sensor_output or {}):
                 # RTX camera ``rgb`` output may include an alpha channel. The
                 # standard dataset contract stores actual RGB consistently.
-                obs["cameras"][camera_name] = sensor.data.output["rgb"][..., :3].contiguous().clone()
+                # Return a view here: RecorderManager/EpisodeData performs the
+                # single owning clone immediately when it appends this frame.
+                obs["cameras"][camera_name] = sensor.data.output["rgb"][..., :3]
 
         extra_sensor_fields = getattr(self.cfg, "extra_sensor_fields", None)
         if extra_sensor_fields is None:
