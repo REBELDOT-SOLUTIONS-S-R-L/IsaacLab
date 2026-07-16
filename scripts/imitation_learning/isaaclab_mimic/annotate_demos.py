@@ -365,8 +365,12 @@ def replay_episode(
     """
     global current_action_index, skip_episode, is_paused
     # read initial state and actions from the loaded episode
-    initial_state = episode.data["initial_state"]
+    initial_state = episode.get_initial_state()
     actions = episode.data["actions"]
+    if isinstance(actions, dict):
+        if "pose" not in actions:
+            raise ValueError("Standard action group lacks 'pose' dataset required for Mimic annotation.")
+        actions = actions["pose"]
     env.sim.reset()
     env.recorder_manager.reset()
     env.reset_to(initial_state, None, is_relative=True)
@@ -381,8 +385,8 @@ def replay_episode(
                 if skip_episode:
                     return False
                 continue
-        action_tensor = torch.Tensor(action).reshape([1, action.shape[0]])
-        env.step(torch.Tensor(action_tensor))
+        action_tensor = action.to(device=env.device, dtype=torch.float32).reshape(1, -1)
+        env.step(action_tensor)
     if success_term is not None:
         if not bool(success_term.func(env, **success_term.params)[0]):
             return False

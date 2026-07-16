@@ -138,6 +138,7 @@ def test_standard_write_episode_schema(temp_dir):
     episode.add("actions/joints", torch.tensor([0.1, 0.2], dtype=torch.float32))
     episode.add("actions/joints", torch.tensor([0.3, 0.4], dtype=torch.float32))
     episode.add("initial_state/articulations/robot/joint_position", torch.tensor([0.0, 0.0]))
+    episode.add("initial_state/articulations/robot/joint_velocity", torch.tensor([0.0, 0.0]))
     episode.add("initial_state/articulations/robot/root_pose", torch.tensor([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]))
     episode.add("initial_state/articulations/robot/root_velocity", torch.zeros(6))
     episode.add("initial_state/rigid_objects/cube/initial_pose", torch.eye(4))
@@ -199,6 +200,19 @@ def test_standard_write_episode_schema(temp_dir):
             "aligned_to": "actions/pose",
             "sample_phase": "pre_step",
         }
+
+    replay_handler = HDF5DatasetFileHandler()
+    replay_handler.open(dataset_file_path)
+    replay_episode = replay_handler.load_episode("demo_0", "cpu")
+    assert torch.equal(
+        replay_episode.get_next_action(),
+        torch.tensor([1, 2, 3, 1, 0, 0, 0, -1], dtype=torch.float32),
+    )
+    replay_state = replay_episode.get_initial_state()
+    assert set(replay_state) == {"articulation", "rigid_object"}
+    assert replay_state["rigid_object"]["cube"]["root_pose"].shape == (1, 7)
+    assert torch.equal(replay_state["rigid_object"]["cube"]["root_velocity"], torch.zeros(1, 6))
+    replay_handler.close()
 
     no_gripper_dataset_file_path = os.path.join(temp_dir, f"{uuid.uuid4()}.hdf5")
     dataset_file_handler = StandardHDF5DatasetFileHandler()

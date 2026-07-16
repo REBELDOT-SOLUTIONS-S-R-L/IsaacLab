@@ -168,7 +168,7 @@ def main():
     env_cfg.terminations = {}
 
     # create environment from loaded config
-    env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
+    env = gym.make(env_name, cfg=env_cfg).unwrapped
 
     teleop_interface = Se3Keyboard(Se3KeyboardCfg(pos_sensitivity=0.1, rot_sensitivity=0.1))
     teleop_interface.add_callback("N", play_cb)

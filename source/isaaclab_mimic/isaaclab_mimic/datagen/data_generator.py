@@ -8,6 +8,7 @@
 import asyncio
 import copy
 import logging
+import math
 from typing import Any
 
 import numpy as np
@@ -30,6 +31,40 @@ from isaaclab_mimic.datagen.selection_strategy import make_selection_strategy
 from isaaclab_mimic.datagen.waypoint import MultiWaypoint, Waypoint, WaypointSequence, WaypointTrajectory
 
 from .datagen_info_pool import DataGenInfoPool
+
+
+def get_adaptive_interpolation_steps(
+    start_pose: torch.Tensor,
+    target_pose: torch.Tensor,
+    minimum_steps: int,
+    max_translation_step: float | None = None,
+    max_rotation_step: float | None = None,
+) -> int:
+    """Return enough intermediate points to bound every Cartesian interval.
+
+    ``PoseUtils.interpolate_poses`` defines ``num_steps`` as the number of
+    intermediate points, so a path with ``num_steps`` has ``num_steps + 1``
+    intervals between its start and target poses.
+    """
+    if minimum_steps < 0:
+        raise ValueError(f"minimum_steps must be non-negative, got {minimum_steps}.")
+    if max_translation_step is not None and max_translation_step <= 0.0:
+        raise ValueError("max_translation_step must be positive when provided.")
+    if max_rotation_step is not None and max_rotation_step <= 0.0:
+        raise ValueError("max_rotation_step must be positive when provided.")
+
+    required_intervals = minimum_steps + 1
+    if max_translation_step is not None:
+        translation_distance = torch.linalg.vector_norm(target_pose[:3, 3] - start_pose[:3, 3]).item()
+        required_intervals = max(required_intervals, math.ceil(translation_distance / max_translation_step))
+
+    if max_rotation_step is not None:
+        relative_rotation = start_pose[:3, :3].transpose(-1, -2) @ target_pose[:3, :3]
+        cosine = ((torch.trace(relative_rotation) - 1.0) * 0.5).clamp(-1.0, 1.0)
+        rotation_distance = torch.acos(cosine).item()
+        required_intervals = max(required_intervals, math.ceil(rotation_distance / max_rotation_step))
+
+    return max(0, required_intervals - 1)
 
 
 def transform_source_data_segment_using_delta_object_pose(
@@ -597,6 +632,8 @@ class DataGenerator:
         # and then execute it once we have the trajectory.
         traj_to_execute = WaypointTrajectory()
 
+        subtask_cfg = self.env_cfg.subtask_configs[eef_name][subtask_index]
+
         if self.env_cfg.datagen_config.generation_interpolate_from_last_target_pose and (not is_first_subtask):
             # Interpolation segment will start from last target pose (which may not have been achieved).
             assert prev_executed_traj is not None
@@ -604,23 +641,38 @@ class DataGenerator:
             init_sequence = WaypointSequence(sequence=[last_waypoint])
         else:
             # Interpolation segment will start from current robot eef pose.
+            # If requested, carry the last executed source gripper value while
+            # the arm transitions from its measured pose. The first subtask has
+            # no previous source value, so its own initial value is appropriate.
+            init_gripper_action = subtask_trajectory[0].gripper_action
+            if not subtask_cfg.interpolate_gripper_action and prev_executed_traj is not None:
+                init_gripper_action = prev_executed_traj[-1].gripper_action
             init_sequence = WaypointSequence.from_poses(
                 poses=self.env.get_robot_eef_pose(env_ids=[env_id], eef_name=eef_name)[0].unsqueeze(0),
-                gripper_actions=subtask_trajectory[0].gripper_action.unsqueeze(0),
-                action_noise=self.env_cfg.subtask_configs[eef_name][subtask_index].action_noise,
+                gripper_actions=init_gripper_action.unsqueeze(0),
+                action_noise=subtask_cfg.action_noise,
             )
         traj_to_execute.add_waypoint_sequence(init_sequence)
+
+        num_interpolation_steps = get_adaptive_interpolation_steps(
+            start_pose=traj_to_execute.last_waypoint.pose,
+            target_pose=subtask_trajectory[0].pose,
+            minimum_steps=subtask_cfg.num_interpolation_steps,
+            max_translation_step=subtask_cfg.max_interpolation_translation_step,
+            max_rotation_step=subtask_cfg.max_interpolation_rotation_step,
+        )
 
         # Merge this trajectory into our trajectory using linear interpolation.
         # Interpolation will happen from the initial pose (@init_sequence) to the first element of @transformed_seq.
         traj_to_execute.merge(
             subtask_trajectory,
-            num_steps_interp=self.env_cfg.subtask_configs[eef_name][subtask_index].num_interpolation_steps,
-            num_steps_fixed=self.env_cfg.subtask_configs[eef_name][subtask_index].num_fixed_steps,
+            num_steps_interp=num_interpolation_steps,
+            num_steps_fixed=subtask_cfg.num_fixed_steps,
             action_noise=(
-                float(self.env_cfg.subtask_configs[eef_name][subtask_index].apply_noise_during_interpolation)
-                * self.env_cfg.subtask_configs[eef_name][subtask_index].action_noise
+                float(subtask_cfg.apply_noise_during_interpolation)
+                * subtask_cfg.action_noise
             ),
+            interpolate_gripper_action=subtask_cfg.interpolate_gripper_action,
         )
 
         # We initialized @traj_to_execute with a pose to allow @merge to handle linear interpolation

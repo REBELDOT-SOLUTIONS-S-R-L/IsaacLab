@@ -271,7 +271,9 @@ class PostStepStandardObservationsRecorder(RecorderTerm):
             sensor = self._env.scene.sensors.get(camera_name)
             sensor_output = getattr(getattr(sensor, "data", None), "output", {}) if sensor is not None else {}
             if sensor is not None and "rgb" in (sensor_output or {}):
-                obs["cameras"][camera_name] = sensor.data.output["rgb"].clone()
+                # RTX camera ``rgb`` output may include an alpha channel. The
+                # standard dataset contract stores actual RGB consistently.
+                obs["cameras"][camera_name] = sensor.data.output["rgb"][..., :3].contiguous().clone()
 
         extra_sensor_fields = getattr(self.cfg, "extra_sensor_fields", None)
         if extra_sensor_fields is None:

@@ -136,7 +136,31 @@ class SubTaskConfig:
     """Amplitude of action noise applied."""
 
     num_interpolation_steps: int = 5
-    """Number of steps for interpolation between waypoints."""
+    """Minimum number of steps for interpolation between waypoints."""
+
+    max_interpolation_translation_step: float | None = None
+    """Maximum Cartesian translation per interpolation interval, in meters.
+
+    When set, Mimic increases :attr:`num_interpolation_steps` as needed so no
+    interpolation interval exceeds this distance. ``None`` disables the
+    translation-based adaptive minimum.
+    """
+
+    max_interpolation_rotation_step: float | None = None
+    """Maximum Cartesian rotation per interpolation interval, in radians.
+
+    When set, Mimic increases :attr:`num_interpolation_steps` as needed so no
+    interpolation interval exceeds this angle. ``None`` disables the
+    rotation-based adaptive minimum.
+    """
+
+    interpolate_gripper_action: bool = True
+    """Whether inserted interpolation waypoints use the next source gripper action.
+
+    If False, inserted waypoints hold the previous gripper action and switch
+    to the exact next source value only at the interpolation endpoint. Source
+    demonstration waypoints themselves are never interpolated.
+    """
 
     num_fixed_steps: int = 0
     """Number of fixed steps for the subtask."""

@@ -172,6 +172,13 @@ def setup_env_config(
     """
     env_cfg = parse_env_cfg(env_name, device=device, num_envs=num_envs)
 
+    subtask_configs = getattr(env_cfg, "subtask_configs", None)
+    if not subtask_configs or not any(subtask_configs.values()):
+        raise ValueError(
+            f"Mimic generation for '{env_name}' requires at least one configured subtask. "
+            "Record and annotate source demonstrations, then populate env_cfg.subtask_configs before generation."
+        )
+
     if generation_num_trials is not None:
         env_cfg.datagen_config.generation_num_trials = generation_num_trials
 

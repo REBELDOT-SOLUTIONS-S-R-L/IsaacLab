@@ -133,19 +133,59 @@ class EpisodeData:
                 current_dataset_pointer[sub_keys[sub_key_index]] = dict()
             current_dataset_pointer = current_dataset_pointer[sub_keys[sub_key_index]]
 
-    def get_initial_state(self) -> torch.Tensor | None:
+    def get_initial_state(self) -> dict | torch.Tensor | None:
         """Get the initial state from the dataset."""
         if "initial_state" not in self._data:
             return None
-        return self._data["initial_state"]
+        initial_state = self._data["initial_state"]
+        if not isinstance(initial_state, dict) or "articulations" not in initial_state:
+            return initial_state
+
+        # Standard Mimic files use schema-facing plural group names and store
+        # rigid-object poses as homogeneous matrices. Convert them into the
+        # InteractiveScene state accepted by ``env.reset_to``.
+        from isaaclab.utils.math import quat_from_matrix
+
+        scene_state = {"articulation": {}, "rigid_object": {}}
+        for name, articulation_state in initial_state["articulations"].items():
+            scene_state["articulation"][name] = {
+                "joint_position": articulation_state["joint_position"],
+                "joint_velocity": articulation_state["joint_velocity"],
+                "root_pose": articulation_state["root_pose"],
+                "root_velocity": articulation_state["root_velocity"],
+            }
+
+        for name, rigid_object_state in initial_state.get("rigid_objects", {}).items():
+            pose_matrix = rigid_object_state["initial_pose"]
+            root_pose = torch.cat(
+                (pose_matrix[..., :3, 3], quat_from_matrix(pose_matrix[..., :3, :3])),
+                dim=-1,
+            )
+            scene_state["rigid_object"][name] = {
+                "root_pose": root_pose,
+                "root_velocity": torch.zeros(
+                    (*root_pose.shape[:-1], 6),
+                    device=root_pose.device,
+                    dtype=root_pose.dtype,
+                ),
+            }
+        return scene_state
 
     def get_action(self, action_index) -> torch.Tensor | None:
         """Get the action of the specified index from the dataset."""
         if "actions" not in self._data:
             return None
-        if action_index >= len(self._data["actions"]):
+        actions = self._data["actions"]
+        if isinstance(actions, dict):
+            if "pose" in actions:
+                actions = actions["pose"]
+            elif "joints" in actions:
+                actions = actions["joints"]
+            else:
+                raise ValueError("Standard actions group lacks 'pose' and 'joints' datasets")
+        if action_index >= len(actions):
             return None
-        return self._data["actions"][action_index]
+        return actions[action_index]
 
     def get_next_action(self) -> torch.Tensor | None:
         """Get the next action from the dataset."""

@@ -210,6 +210,7 @@ class WaypointTrajectory:
         num_steps,
         skip_interpolation=False,
         action_noise=0.0,
+        interpolate_gripper_action=True,
     ):
         """
         Adds a new waypoint sequence corresponding to a desired target pose. A new WaypointSequence
@@ -231,6 +232,10 @@ class WaypointTrajectory:
 
             action_noise (float): scale of random gaussian noise to add during action execution (e.g.
                 when @execute is called)
+
+            interpolate_gripper_action (bool): if False, hold the previous waypoint's
+                gripper action on inserted interpolation points and apply @gripper_action
+                only at the target endpoint. Has no effect when @skip_interpolation is True.
         """
         if len(self.waypoint_sequences) == 0:
             assert skip_interpolation, "cannot interpolate since this is the first waypoint sequence"
@@ -249,7 +254,14 @@ class WaypointTrajectory:
                 num_steps=num_steps,
             )
             assert num_steps == num_steps_2
-            gripper_actions = gripper_action.unsqueeze(0).repeat((num_steps + 2, 1))
+            if interpolate_gripper_action:
+                gripper_actions = gripper_action.unsqueeze(0).repeat((num_steps + 2, 1))
+            else:
+                # Cartesian transition frames are synthetic. Preserve the last
+                # executed source value through them, then switch exactly at
+                # the first target/source pose.
+                gripper_actions = last_waypoint.gripper_action.unsqueeze(0).repeat((num_steps + 2, 1))
+                gripper_actions[-1] = gripper_action
             # make sure to skip the first element of the new path, which already exists on the current trajectory path
             poses = poses[1:]
             gripper_actions = gripper_actions[1:]
@@ -285,6 +297,7 @@ class WaypointTrajectory:
         num_steps_interp=None,
         num_steps_fixed=None,
         action_noise=0.0,
+        interpolate_gripper_action=True,
     ):
         """
         Merge this trajectory with another (@other).
@@ -299,6 +312,10 @@ class WaypointTrajectory:
                 target poses corresponding to the first target pose in @other
 
             action_noise (float): noise to use during the interpolation segment
+
+            interpolate_gripper_action (bool): whether inserted interpolation
+                points should immediately use the next source gripper value.
+                If False, the previous value is held until the endpoint.
         """
         need_interp = (num_steps_interp is not None) and (num_steps_interp > 0)
         need_fixed = (num_steps_fixed is not None) and (num_steps_fixed > 0)
@@ -320,6 +337,7 @@ class WaypointTrajectory:
                     num_steps=num_steps_interp,
                     action_noise=action_noise,
                     skip_interpolation=False,
+                    interpolate_gripper_action=interpolate_gripper_action,
                 )
 
             if need_fixed:
