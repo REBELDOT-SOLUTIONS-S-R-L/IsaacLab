@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+
 from isaaclab.app import AppLauncher
 
 # launch omniverse app
@@ -14,12 +16,15 @@ import torch
 
 import isaaclab.utils.math as PoseUtils
 
+from isaaclab_mimic.datagen.data_generator import DataGenerator
 from isaaclab_mimic.datagen.datagen_info import DatagenInfo
 
 # Importing the necessary classes for the testing
 from isaaclab_mimic.datagen.selection_strategy import (
     NearestNeighborObjectStrategy,
     NearestNeighborRobotDistanceStrategy,
+    SourceFromSubtaskStrategy,
+    make_selection_strategy,
 )
 
 # Number of iterations to run the batched tests
@@ -36,6 +41,119 @@ def nearest_neighbor_object_strategy():
 def nearest_neighbor_robot_distance_strategy():
     """Fixture for NearestNeighborRobotDistanceStrategy."""
     return NearestNeighborRobotDistanceStrategy()
+
+
+@pytest.fixture
+def source_from_subtask_strategy():
+    """Fixture for SourceFromSubtaskStrategy."""
+    return SourceFromSubtaskStrategy()
+
+
+@pytest.fixture
+def subtask_configs():
+    """Minimal ordered subtask configs used by source-from-subtask tests."""
+    return [
+        SimpleNamespace(subtask_term_signal="approach"),
+        SimpleNamespace(subtask_term_signal="carry"),
+        SimpleNamespace(subtask_term_signal="return_home"),
+    ]
+
+
+def test_source_from_subtask_strategy_is_registered():
+    assert isinstance(make_selection_strategy("source_from_subtask"), SourceFromSubtaskStrategy)
+
+
+def test_source_from_subtask_reuses_prior_selection(source_from_subtask_strategy, subtask_configs):
+    selected = source_from_subtask_strategy.select_source_demo(
+        eef_pose=None,
+        object_pose=None,
+        src_subtask_datagen_infos=[],
+        source_subtask="carry",
+        eef_name="right_arm",
+        source_demo_selections={"right_arm": [4, 2]},
+        subtask_configs=subtask_configs,
+    )
+
+    assert selected == 2
+
+
+def test_source_from_subtask_requires_source_subtask(source_from_subtask_strategy, subtask_configs):
+    with pytest.raises(ValueError, match="requires a 'source_subtask' kwarg"):
+        source_from_subtask_strategy.select_source_demo(
+            eef_pose=None,
+            object_pose=None,
+            src_subtask_datagen_infos=[],
+            eef_name="right_arm",
+            source_demo_selections={"right_arm": [4]},
+            subtask_configs=subtask_configs,
+        )
+
+
+def test_source_from_subtask_requires_generator_context(source_from_subtask_strategy):
+    with pytest.raises(ValueError, match="requires the data generator to provide"):
+        source_from_subtask_strategy.select_source_demo(
+            eef_pose=None,
+            object_pose=None,
+            src_subtask_datagen_infos=[],
+            source_subtask="carry",
+        )
+
+
+def test_source_from_subtask_rejects_unknown_signal(source_from_subtask_strategy, subtask_configs):
+    with pytest.raises(ValueError, match="no subtask with subtask_term_signal='unknown'"):
+        source_from_subtask_strategy.select_source_demo(
+            eef_pose=None,
+            object_pose=None,
+            src_subtask_datagen_infos=[],
+            source_subtask="unknown",
+            eef_name="right_arm",
+            source_demo_selections={"right_arm": [4]},
+            subtask_configs=subtask_configs,
+        )
+
+
+def test_source_from_subtask_rejects_not_yet_generated_reference(source_from_subtask_strategy, subtask_configs):
+    with pytest.raises(ValueError, match="has not been generated yet"):
+        source_from_subtask_strategy.select_source_demo(
+            eef_pose=None,
+            object_pose=None,
+            src_subtask_datagen_infos=[],
+            source_subtask="carry",
+            eef_name="right_arm",
+            source_demo_selections={"right_arm": [4]},
+            subtask_configs=subtask_configs,
+        )
+
+
+def test_source_from_subtask_supports_object_free_subtask(subtask_configs):
+    eef_name = "right_arm"
+    pose = torch.eye(4).unsqueeze(0)
+    gripper_action = torch.zeros((1, 1))
+    source_infos = [
+        DatagenInfo(
+            eef_pose={eef_name: pose},
+            object_poses={},
+            target_eef_pose={eef_name: pose},
+            gripper_action={eef_name: gripper_action},
+        )
+        for _ in range(2)
+    ]
+    generator = DataGenerator.__new__(DataGenerator)
+    generator.env_cfg = SimpleNamespace(subtask_configs={eef_name: subtask_configs})
+    generator.src_demo_datagen_info_pool = SimpleNamespace(datagen_infos=source_infos)
+
+    selected = generator.select_source_demo(
+        eef_name=eef_name,
+        eef_pose=pose[0],
+        object_pose=None,
+        src_demo_current_subtask_boundaries=np.array([[0, 1], [0, 1]]),
+        subtask_object_name=None,
+        selection_strategy_name="source_from_subtask",
+        selection_strategy_kwargs={"source_subtask": "carry"},
+        source_demo_selections={eef_name: [1, 0]},
+    )
+
+    assert selected == 0
 
 
 def test_select_source_demo_identity_orientations_object_strategy(nearest_neighbor_object_strategy):

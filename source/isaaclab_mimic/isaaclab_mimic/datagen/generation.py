@@ -27,6 +27,31 @@ num_failures = 0
 num_attempts = 0
 
 
+def extract_failure_termination_terms(terminations: object | dict | None) -> dict[str, TerminationTermCfg]:
+    """Return the active non-timeout termination terms that represent task failure.
+
+    Mimic evaluates the task's ``success`` term separately and manages the
+    generated attempt's lifetime itself, so timeout terms are intentionally
+    excluded. Every other active termination term is treated as an immediate
+    failure gate, regardless of its task-specific name.
+
+    Args:
+        terminations: Termination configuration object or dictionary.
+
+    Returns:
+        A name-to-configuration mapping of failure termination terms.
+    """
+    if terminations is None:
+        return {}
+
+    cfg_items = terminations.items() if isinstance(terminations, dict) else vars(terminations).items()
+    return {
+        term_name: term_cfg
+        for term_name, term_cfg in cfg_items
+        if term_name != "success" and isinstance(term_cfg, TerminationTermCfg) and not term_cfg.time_out
+    }
+
+
 async def run_data_generator(
     env: ManagerBasedRLMimicEnv,
     env_id: int,
@@ -36,6 +61,7 @@ async def run_data_generator(
     success_term: TerminationTermCfg,
     pause_subtask: bool = False,
     motion_planner: Any = None,
+    failure_terms: dict[str, TerminationTermCfg] | None = None,
 ):
     """Run mimic data generation from the given data generator in the specified environment index.
 
@@ -48,6 +74,7 @@ async def run_data_generator(
         success_term: The success termination term to use.
         pause_subtask: Whether to pause the subtask during generation.
         motion_planner: The motion planner to use.
+        failure_terms: Optional named failure termination terms that stop the current attempt.
     """
     global num_success, num_failures, num_attempts
     while True:
@@ -59,6 +86,7 @@ async def run_data_generator(
                 env_action_queue=env_action_queue,
                 pause_subtask=pause_subtask,
                 motion_planner=motion_planner,
+                failure_terms=failure_terms,
             )
         except Exception as e:
             sys.stderr.write(traceback.format_exc())
@@ -151,7 +179,7 @@ def setup_env_config(
     device: str,
     generation_num_trials: int | None = None,
     recorder_cfg: RecorderManagerBaseCfg | None = None,
-) -> tuple[Any, Any]:
+) -> tuple[Any, TerminationTermCfg, dict[str, TerminationTermCfg]]:
     """Configure the environment for data generation.
 
     Args:
@@ -166,6 +194,7 @@ def setup_env_config(
         tuple containing:
             - env_cfg: The environment configuration
             - success_term: The success termination condition
+            - failure_terms: The named failure termination conditions
 
     Raises:
         NotImplementedError: If no success termination term found
@@ -184,15 +213,20 @@ def setup_env_config(
 
     env_cfg.env_name = env_name
 
-    # Extract success checking function
-    success_term = None
-    if hasattr(env_cfg.terminations, "success"):
-        success_term = env_cfg.terminations.success
-        env_cfg.terminations.success = None
-    else:
+    # Extract the success predicate and every active non-timeout failure
+    # predicate before disabling the environment's termination manager.
+    if env_cfg.terminations is None:
+        raise NotImplementedError("No termination configuration was found in the environment.")
+    termination_items = env_cfg.terminations if isinstance(env_cfg.terminations, dict) else vars(env_cfg.terminations)
+    success_term = termination_items.get("success")
+    if not isinstance(success_term, TerminationTermCfg):
         raise NotImplementedError("No success termination term was found in the environment.")
+    failure_terms = extract_failure_termination_terms(env_cfg.terminations)
 
     # Configure for data generation
+    # The termination manager must be disabled so it cannot auto-reset while
+    # a generated attempt is being assembled. Mimic evaluates the preserved
+    # success and failure predicates explicitly after each generated action.
     env_cfg.terminations = None
     env_cfg.observations.policy.concatenate_terms = False
 
@@ -209,7 +243,7 @@ def setup_env_config(
     else:
         env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_SUCCEEDED_ONLY
 
-    return env_cfg, success_term
+    return env_cfg, success_term, failure_terms
 
 
 def setup_async_generation(
@@ -219,6 +253,7 @@ def setup_async_generation(
     success_term: Any,
     pause_subtask: bool = False,
     motion_planners: Any = None,
+    failure_terms: dict[str, TerminationTermCfg] | None = None,
 ) -> dict[str, Any]:
     """Setup async data generation tasks.
 
@@ -229,6 +264,7 @@ def setup_async_generation(
         success_term: Success termination condition
         pause_subtask: Whether to pause after subtasks
         motion_planners: Motion planner instances for all environments
+        failure_terms: Optional named failure conditions that stop the current attempt
 
     Returns:
         List of asyncio tasks for data generation
@@ -256,6 +292,7 @@ def setup_async_generation(
                 success_term,
                 pause_subtask=pause_subtask,
                 motion_planner=env_motion_planner,
+                failure_terms=failure_terms,
             )
         )
         data_generator_asyncio_tasks.append(task)

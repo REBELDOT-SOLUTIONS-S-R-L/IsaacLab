@@ -295,9 +295,7 @@ class NearestNeighborMultiObjectStrategy(SelectionStrategy):
         # source demos, so a missing object never silently skews the score
         if object_names is None:
             object_names = [
-                name
-                for name in all_object_poses
-                if all(name in src_poses for src_poses in src_all_object_poses)
+                name for name in all_object_poses if all(name in src_poses for src_poses in src_all_object_poses)
             ]
         if len(object_names) == 0:
             raise ValueError(
@@ -315,9 +313,7 @@ class NearestNeighborMultiObjectStrategy(SelectionStrategy):
             obj_weight = object_weights.get(name, 1.0)
 
             # source poses for this object across all demos: [N, 4, 4]
-            src_object_poses = torch.stack(
-                [src_all_object_poses[i][name] for i in range(n_src)]
-            ).to(ref_device)
+            src_object_poses = torch.stack([src_all_object_poses[i][name] for i in range(n_src)]).to(ref_device)
             cur_object_pose = all_object_poses[name].to(ref_device)
 
             # split into positions and rotations
@@ -358,6 +354,64 @@ class NearestNeighborMultiObjectStrategy(SelectionStrategy):
         rand_k = torch.randint(0, nn_k, (1,)).item()
         top_k_neighbors_in_order = torch.argsort(combined_dists)[:nn_k]
         return top_k_neighbors_in_order[rand_k]
+
+
+class SourceFromSubtaskStrategy(SelectionStrategy):
+    """Reuse the source demonstration selected for a prior subtask.
+
+    The ``source_subtask`` argument identifies a prior subtask by its
+    ``subtask_term_signal``. The referenced subtask must belong to the same end
+    effector and must already have been generated.
+    """
+
+    NAME = "source_from_subtask"
+
+    def select_source_demo(
+        self,
+        eef_pose,
+        object_pose,
+        src_subtask_datagen_infos,
+        source_subtask=None,
+        eef_name=None,
+        source_demo_selections=None,
+        subtask_configs=None,
+        **kwargs,
+    ):
+        """Return the source demo index recorded for ``source_subtask``."""
+        if source_subtask is None:
+            raise ValueError(
+                "source_from_subtask requires a 'source_subtask' kwarg naming "
+                "the prior subtask's subtask_term_signal to reuse the source from."
+            )
+        if source_demo_selections is None or eef_name is None or subtask_configs is None:
+            raise ValueError(
+                "source_from_subtask requires the data generator to provide "
+                "'eef_name', 'source_demo_selections', and 'subtask_configs'."
+            )
+
+        source_subtask_index = next(
+            (
+                index
+                for index, subtask_config in enumerate(subtask_configs)
+                if getattr(subtask_config, "subtask_term_signal", None) == source_subtask
+            ),
+            None,
+        )
+        if source_subtask_index is None:
+            raise ValueError(
+                "source_from_subtask: no subtask with "
+                f"subtask_term_signal={source_subtask!r} found for end effector {eef_name!r}."
+            )
+
+        prior_selections = source_demo_selections.get(eef_name, [])
+        if source_subtask_index >= len(prior_selections):
+            raise ValueError(
+                f"source_from_subtask: referenced subtask {source_subtask!r} "
+                f"(index {source_subtask_index}) for end effector {eef_name!r} has not been generated yet "
+                f"(only {len(prior_selections)} prior selections are available)."
+            )
+
+        return int(prior_selections[source_subtask_index])
 
 
 class NearestNeighborRobotDistanceStrategy(SelectionStrategy):

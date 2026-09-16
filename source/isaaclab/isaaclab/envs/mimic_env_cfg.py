@@ -33,6 +33,8 @@ class DataGenConfig:
     generation_keep_failed: bool = False
     """Whether to keep failed generation trials.
 
+    During Mimic generation, every active non-timeout termination term other than
+    ``success`` acts as an immediate failure gate. Its name is task-defined.
     Keeping failed demonstrations is useful for visualizing and debugging low success rates.
     """
 
@@ -108,11 +110,17 @@ class SubTaskConfig:
         * 'random'
         * 'nearest_neighbor_object'
         * 'nearest_neighbor_robot_distance'
+        * 'source_from_subtask'
 
     Note:
         For 'nearest_neighbor_object' and 'nearest_neighbor_robot_distance', the subtask needs
         to have 'object_ref' set to a value other than 'None'. These strategies typically yield
         higher success rates than the default 'random' strategy when object_ref is set.
+
+        'source_from_subtask' reuses the source demonstration selected for a prior subtask on
+        the same end effector. Set ``selection_strategy_kwargs`` to
+        ``{"source_subtask": "<prior subtask_term_signal>"}``. This strategy does not require
+        'object_ref'.
     """
 
     selection_strategy_kwargs: dict = {}

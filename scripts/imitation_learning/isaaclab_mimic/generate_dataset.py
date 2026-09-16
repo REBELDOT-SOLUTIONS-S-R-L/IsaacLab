@@ -105,7 +105,7 @@ def main():
 
     # Configure environment
     recorder_cfg = StandardGeneratedMimicRecorderManagerCfg() if args_cli.dataset_schema == "standard" else None
-    env_cfg, success_term = setup_env_config(
+    env_cfg, success_term, failure_terms = setup_env_config(
         env_name=env_name,
         output_dir=output_dir,
         output_file_name=output_file_name,
@@ -172,6 +172,7 @@ def main():
         success_term=success_term,
         pause_subtask=args_cli.pause_subtask,
         motion_planners=motion_planners,  # Pass the motion planners dictionary
+        failure_terms=failure_terms,
     )
 
     try:

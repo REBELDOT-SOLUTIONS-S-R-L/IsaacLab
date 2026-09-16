@@ -293,6 +293,7 @@ class DataGenerator:
         selection_strategy_name: str,
         selection_strategy_kwargs: dict | None = None,
         all_object_poses: dict | None = None,
+        source_demo_selections: dict[str, list[int]] | None = None,
     ) -> int:
         """Helper method to run source subtask segment selection.
 
@@ -308,13 +309,16 @@ class DataGenerator:
             all_object_poses: optional dict mapping every object name to its current 4x4 pose
                 in the scene. Used by multi-object selection strategies that match several
                 objects jointly (e.g. ``nearest_neighbor_multi_object``).
+            source_demo_selections: source demo index selected for each previously generated
+                subtask, grouped by end effector. Used by ``source_from_subtask``.
 
         Returns:
             The selected source demo index
         """
         if subtask_object_name is None:
-            # no reference object - only random selection is supported
-            assert selection_strategy_name == "random", selection_strategy_name
+            # Strategies that inspect object poses require a reference object. The
+            # source-from-subtask strategy only reuses an earlier selection.
+            assert selection_strategy_name in ("random", "source_from_subtask"), selection_strategy_name
 
         # We need to collect the datagen info objects over the timesteps for the subtask segment in each source
         # demo, so that it can be used by the selection strategy.
@@ -371,6 +375,9 @@ class DataGenerator:
             src_subtask_datagen_infos=src_subtask_datagen_infos,
             all_object_poses=all_object_poses,
             src_all_object_poses=src_all_object_poses,
+            eef_name=eef_name,
+            source_demo_selections=source_demo_selections,
+            subtask_configs=self.env_cfg.subtask_configs.get(eef_name),
             **selection_strategy_kwargs,
         )
 
@@ -384,6 +391,7 @@ class DataGenerator:
         all_randomized_subtask_boundaries: dict,
         runtime_subtask_constraints_dict: dict,
         selected_src_demo_inds: dict,
+        source_demo_selections: dict[str, list[int]] | None = None,
     ) -> WaypointTrajectory:
         """Build a transformed waypoint trajectory for a single subtask of an end-effector.
 
@@ -414,6 +422,8 @@ class DataGenerator:
                 for constraints (e.g., selected source ID, delta transform, synchronous steps).
             selected_src_demo_inds: Per-EEF mapping for the currently selected source demo index
                 (may be reused across arms if configured).
+            source_demo_selections: Source demo index selected for each previously generated
+                subtask, grouped by end effector.
 
         Returns:
             WaypointTrajectory: The transformed trajectory for the selected subtask segment.
@@ -479,6 +489,7 @@ class DataGenerator:
                 selection_strategy_name=self.env_cfg.subtask_configs[eef_name][subtask_ind].selection_strategy,
                 selection_strategy_kwargs=self.env_cfg.subtask_configs[eef_name][subtask_ind].selection_strategy_kwargs,
                 all_object_poses=all_object_poses,
+                source_demo_selections=source_demo_selections,
             )
 
         assert selected_src_demo_inds[eef_name] is not None
@@ -645,7 +656,9 @@ class DataGenerator:
             # the arm transitions from its measured pose. The first subtask has
             # no previous source value, so its own initial value is appropriate.
             init_gripper_action = subtask_trajectory[0].gripper_action
-            if not subtask_cfg.interpolate_gripper_action and prev_executed_traj is not None:
+            # The generator passes [] rather than None before the first
+            # subtask, so only index a genuinely non-empty prior trajectory.
+            if not subtask_cfg.interpolate_gripper_action and prev_executed_traj:
                 init_gripper_action = prev_executed_traj[-1].gripper_action
             init_sequence = WaypointSequence.from_poses(
                 poses=self.env.get_robot_eef_pose(env_ids=[env_id], eef_name=eef_name)[0].unsqueeze(0),
@@ -668,10 +681,7 @@ class DataGenerator:
             subtask_trajectory,
             num_steps_interp=num_interpolation_steps,
             num_steps_fixed=subtask_cfg.num_fixed_steps,
-            action_noise=(
-                float(subtask_cfg.apply_noise_during_interpolation)
-                * subtask_cfg.action_noise
-            ),
+            action_noise=(float(subtask_cfg.apply_noise_during_interpolation) * subtask_cfg.action_noise),
             interpolate_gripper_action=subtask_cfg.interpolate_gripper_action,
         )
 
@@ -692,6 +702,7 @@ class DataGenerator:
         pause_subtask: bool = False,
         export_demo: bool = True,
         motion_planner: Any | None = None,
+        failure_terms: dict[str, TerminationTermCfg] | None = None,
     ) -> dict:
         """Attempt to generate a new demonstration.
 
@@ -703,6 +714,7 @@ class DataGenerator:
             pause_subtask: whether to pause the subtask generation
             export_demo: whether to export the demo
             motion_planner: motion planner to use for motion planning
+            failure_terms: optional named termination terms that stop the attempt on failure
 
         Returns:
             A dictionary containing the following items:
@@ -712,6 +724,8 @@ class DataGenerator:
                 - datagen_infos (list): datagen_info at each timestep
                 - actions (np.array): action executed at each timestep
                 - success (bool): whether the trajectory successfully solved the task or not
+                - failed (bool): whether execution stopped on a failure term
+                - failure_term_names (list[str]): failure terms that stopped execution
                 - src_demo_inds (list): list of selected source demonstration indices for each subtask
                 - src_demo_labels (np.array): same as @src_demo_inds, but repeated to have a label for
                   each timestep of the trajectory.
@@ -737,6 +751,8 @@ class DataGenerator:
         generated_obs = []
         generated_actions = []
         generated_success = False
+        generated_failed = False
+        generated_failure_term_names = []
 
         # some eef-specific state variables used during generation
         current_eef_selected_src_demo_indices = {}
@@ -792,9 +808,10 @@ class DataGenerator:
                                 randomized_subtask_boundaries,
                                 runtime_subtask_constraints_dict,
                                 current_eef_selected_src_demo_indices,  # updated in the method
+                                source_demo_selections=current_eef_reference_demo_indices,
                             )
                             current_eef_reference_demo_indices[eef_name].append(
-                                current_eef_selected_src_demo_indices[eef_name]
+                                int(current_eef_selected_src_demo_indices[eef_name])
                             )
                             # With skillgen, use a motion planner to transition between subtasks.
                             if self.env_cfg.datagen_config.use_skillgen:
@@ -950,6 +967,7 @@ class DataGenerator:
                 success_term=success_term,
                 env_id=env_id,
                 env_action_queue=env_action_queue,
+                failure_terms=failure_terms,
             )
 
             # Update execution state buffers
@@ -958,6 +976,15 @@ class DataGenerator:
                 generated_obs.extend(exec_results["observations"])
                 generated_actions.extend(exec_results["actions"])
                 generated_success = generated_success or exec_results["success"]
+
+            # Failure predicates are evaluated after the environment step, so
+            # the failure-causing transition is recorded before this attempt
+            # is exported. Do not execute any later subtask waypoints.
+            if exec_results["failed"]:
+                generated_failed = True
+                generated_success = False
+                generated_failure_term_names = exec_results["failure_term_names"]
+                break
 
             # Get the navigation state
             if self.env_cfg.datagen_config.use_navigation_controller:
@@ -1078,6 +1105,8 @@ class DataGenerator:
             observations=generated_obs,
             actions=generated_actions,
             success=generated_success,
+            failed=generated_failed,
+            failure_term_names=generated_failure_term_names,
         )
         return results
 

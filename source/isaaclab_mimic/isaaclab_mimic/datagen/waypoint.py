@@ -388,6 +388,7 @@ class MultiWaypoint:
         success_term: TerminationTermCfg,
         env_id: int = 0,
         env_action_queue: asyncio.Queue | None = None,
+        failure_terms: dict[str, TerminationTermCfg] | None = None,
     ):
         """
         Executes the multi-waypoint eef actions in the environment.
@@ -397,9 +398,11 @@ class MultiWaypoint:
             success_term: The termination term to check for task success.
             env_id: The environment ID to execute the multi-waypoint actions in.
             env_action_queue: The asyncio queue to put the action into.
+            failure_terms: Optional named termination terms to check for task failure.
 
         Returns:
-            A dictionary containing the state, observation, action, and success of the multi-waypoint actions.
+            A dictionary containing the state, observation, action, success,
+            and triggered failure term names for the multi-waypoint actions.
         """
         # current state
         state = env.scene.get_state(is_relative=True)
@@ -437,11 +440,18 @@ class MultiWaypoint:
             obs = env.obs_buf
 
         success = bool(success_term.func(env, **success_term.params)[env_id])
+        triggered_failure_terms = [
+            term_name
+            for term_name, term_cfg in (failure_terms or {}).items()
+            if bool(term_cfg.func(env, **term_cfg.params)[env_id])
+        ]
 
         result = dict(
             states=[state],
             observations=[obs],
             actions=[play_action],
             success=success,
+            failed=bool(triggered_failure_terms),
+            failure_term_names=triggered_failure_terms,
         )
         return result
